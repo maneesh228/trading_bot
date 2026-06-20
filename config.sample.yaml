@@ -1,0 +1,28 @@
+broker:
+  name: zerodha
+  live_trading: false
+
+market:
+  exchange: NSE
+  poll_interval_seconds: 5
+  square_off_time: "15:15"
+
+risk:
+  max_trades_per_day: 6
+  max_position_value: 25000
+  per_trade_stop_loss_pct: 0.6
+  per_trade_target_pct: 1.0
+
+watchlist:
+  - symbol: INFY
+    quantity: 1
+    strategy:
+      name: sma_crossover
+      fast_window: 5
+      slow_window: 13
+  - symbol: RELIANCE
+    quantity: 1
+    strategy:
+      name: opening_range_breakout
+      opening_minutes: 15
+

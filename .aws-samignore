@@ -1,0 +1,11 @@
+.env
+.git/
+.aws-sam/
+.venv/
+.venv-1/
+.pytest_cache/
+.pycache_tmp/
+__pycache__/
+*.pyc
+*.pyo
+tests/

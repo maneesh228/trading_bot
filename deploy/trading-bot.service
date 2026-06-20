@@ -1,0 +1,18 @@
+[Unit]
+Description=Zerodha intraday trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai_trading_agent
+Environment=KITE_SECRET_NAME=REPLACE_WITH_KITE_SECRET_NAME
+Environment=AWS_DEFAULT_REGION=ap-south-1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ai_trading_agent/.venv/bin/python -m trading_bot.cli run --config /opt/ai_trading_agent/config.yaml
+Restart=on-failure
+RestartSec=10
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target

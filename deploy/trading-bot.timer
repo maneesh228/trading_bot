@@ -1,0 +1,10 @@
+[Unit]
+Description=Start Zerodha intraday trading bot on market days
+
+[Timer]
+OnCalendar=Mon..Fri 09:14:00
+Persistent=false
+Unit=trading-bot.service
+
+[Install]
+WantedBy=timers.target

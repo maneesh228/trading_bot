@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+
+
+class SignalSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    EXIT = "EXIT"
+    HOLD = "HOLD"
+
+
+@dataclass(frozen=True)
+class Tick:
+    symbol: str
+    price: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class Signal:
+    side: SignalSide
+    reason: str = ""
+
+
+@dataclass
+class Position:
+    symbol: str
+    quantity: int
+    side: SignalSide
+    entry_price: float
+    entry_time: datetime
+
+    def pnl_pct(self, current_price: float) -> float:
+        if self.side == SignalSide.BUY:
+            return ((current_price - self.entry_price) / self.entry_price) * 100
+        if self.side == SignalSide.SELL:
+            return ((self.entry_price - current_price) / self.entry_price) * 100
+        return 0.0
+
+
+@dataclass(frozen=True)
+class OrderRequest:
+    symbol: str
+    quantity: int
+    side: SignalSide
+    price: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    order_id: str
+    request: OrderRequest
+    live: bool
+

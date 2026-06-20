@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Zerodha Kite redirect and postback API for the intraday trading bot.
+
+Parameters:
+  KiteApiKey:
+    Type: String
+    NoEcho: true
+  KiteApiSecret:
+    Type: String
+    NoEcho: true
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        KITE_SECRET_NAME: !Ref KiteSecret
+        POSTBACK_TABLE_NAME: !Ref KitePostbackTable
+
+Resources:
+  KiteHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+
+  KiteSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Kite Connect credentials and daily access token.
+      SecretString: !Sub |
+        {"api_key":"${KiteApiKey}","api_secret":"${KiteApiSecret}","access_token":""}
+
+  KitePostbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+
+  KiteLoginUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda_src/
+      Handler: lambda_app.login_url_handler
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref KiteSecret
+      Events:
+        LoginUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KiteHttpApi
+            Path: /kite/login
+            Method: GET
+
+  KiteCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda_src/
+      Handler: lambda_app.kite_callback_handler
+      Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref KiteSecret
+        - Statement:
+            Effect: Allow
+            Action:
+              - secretsmanager:PutSecretValue
+            Resource: !Ref KiteSecret
+      Events:
+        Callback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KiteHttpApi
+            Path: /kite/callback
+            Method: GET
+
+  KitePostbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda_src/
+      Handler: lambda_app.kite_postback_handler
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref KitePostbackTable
+      Events:
+        Postback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KiteHttpApi
+            Path: /kite/postback
+            Method: POST
+
+  TradingBotEc2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ReadKiteSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref KiteSecret
+
+  TradingBotEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref TradingBotEc2Role
+
+Outputs:
+  KiteSecretId:
+    Description: Secret ID used by the EC2 trading bot as KITE_SECRET_NAME.
+    Value: !Ref KiteSecret
+  ApiBaseUrl:
+    Description: API Gateway base URL.
+    Value: !Sub "https://${KiteHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  TradingBotEc2RoleName:
+    Description: IAM role for the EC2 trading bot.
+    Value: !Ref TradingBotEc2Role
+  TradingBotEc2InstanceProfileName:
+    Description: Instance profile to attach to the EC2 trading bot instance.
+    Value: !Ref TradingBotEc2InstanceProfile
+  KiteLoginUrlEndpoint:
+    Description: Endpoint that returns the Zerodha login URL.
+    Value: !Sub "https://${KiteHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/kite/login"
+  KiteRedirectUrl:
+    Description: Configure this as the Kite Connect redirect URL.
+    Value: !Sub "https://${KiteHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/kite/callback"
+  KitePostbackUrl:
+    Description: Configure this as the Kite Connect postback URL.
+    Value: !Sub "https://${KiteHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/kite/postback"

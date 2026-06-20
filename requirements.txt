@@ -1,0 +1,4 @@
+boto3>=1.34.0
+kiteconnect>=5.0.1
+PyYAML>=6.0.1
+python-dotenv>=1.0.1

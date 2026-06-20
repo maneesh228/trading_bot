@@ -1,0 +1,11 @@
+.env
+.gitdir/
+config.yaml
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pycache_tmp/
+.venv/
+.venv-1/
+.aws-sam/
+samconfig.toml

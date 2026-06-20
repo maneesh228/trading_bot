@@ -1,0 +1,2 @@
+"""Intraday trading bot package."""
+
