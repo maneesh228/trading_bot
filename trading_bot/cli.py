@@ -11,6 +11,7 @@ from trading_bot.backtest import run_backtest
 from trading_bot.broker import ZerodhaBroker, make_kite_for_login
 from trading_bot.config import load_config
 from trading_bot.engine import TradingEngine
+from trading_bot.journal import TradeJournal
 from trading_bot.token_store import load_runtime_credentials, make_kite_client
 
 
@@ -36,7 +37,7 @@ def generate_token(request_token: str) -> None:
     print(session["access_token"])
 
 
-def run(config_path: str) -> None:
+def run(config_path: str, journal_path: str) -> None:
     config = load_config(config_path)
     if config.broker.name != "zerodha":
         raise ValueError(f"Unsupported broker: {config.broker.name}")
@@ -44,7 +45,7 @@ def run(config_path: str) -> None:
         exchange=config.market.exchange,
         live_trading=config.broker.live_trading,
     )
-    TradingEngine(config=config, broker=broker).run_forever()
+    TradingEngine(config=config, broker=broker, journal=TradeJournal(journal_path)).run_forever()
 
 
 def backtest(config_path: str, days: int, interval: str) -> None:
@@ -97,6 +98,7 @@ def main() -> None:
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--config", default="config.yaml")
+    run_parser.add_argument("--journal", default="data/trade_journal.jsonl")
 
     backtest_parser = subparsers.add_parser("backtest")
     backtest_parser.add_argument("--config", default="config.yaml")
@@ -109,7 +111,7 @@ def main() -> None:
     elif args.command == "generate-token":
         generate_token(args.request_token)
     elif args.command == "run":
-        run(args.config)
+        run(args.config, args.journal)
     elif args.command == "backtest":
         backtest(args.config, args.days, args.interval)
 

@@ -116,6 +116,14 @@ sudo systemctl status trading-bot.service
 journalctl -u trading-bot.service -f
 ```
 
+The bot also writes structured trade journal records to:
+
+```text
+/opt/ai_trading_agent/data/trade_journal.jsonl
+```
+
+Each line is one JSON event for later analysis, including signals, skipped orders, placed orders, exits, and square-off events.
+
 ## Run In Dry-Run Mode
 
 ```powershell

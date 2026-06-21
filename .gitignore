@@ -1,6 +1,7 @@
 .env
 .gitdir/
 config.yaml
+data/
 __pycache__/
 *.py[cod]
 .pytest_cache/
