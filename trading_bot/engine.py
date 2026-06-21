@@ -29,6 +29,7 @@ class TradingEngine:
             max_position_value=config.risk.max_position_value,
             stop_loss_pct=config.risk.per_trade_stop_loss_pct,
             target_pct=config.risk.per_trade_target_pct,
+            trailing_stop_loss_pct=config.risk.trailing_stop_loss_pct,
         )
 
     def run_forever(self) -> None:

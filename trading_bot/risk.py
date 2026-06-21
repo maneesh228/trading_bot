@@ -11,8 +11,10 @@ class RiskManager:
     max_position_value: float
     stop_loss_pct: float
     target_pct: float
+    trailing_stop_loss_pct: float | None = None
     trades_today: int = 0
     positions: dict[str, Position] = field(default_factory=dict)
+    best_prices: dict[str, float] = field(default_factory=dict)
 
     def can_place(self, request: OrderRequest) -> tuple[bool, str]:
         if request.side == SignalSide.HOLD:
@@ -37,18 +39,51 @@ class RiskManager:
         if position is None:
             return None
 
+        self._update_best_price(position, price)
         pnl_pct = position.pnl_pct(price)
         if pnl_pct <= -abs(self.stop_loss_pct):
             return f"stop loss hit at {pnl_pct:.2f}%"
+        trailing_reason = self._trailing_stop_reason(position, price)
+        if trailing_reason:
+            return trailing_reason
         if pnl_pct >= abs(self.target_pct):
             return f"target hit at {pnl_pct:.2f}%"
         return None
 
     def record_entry(self, position: Position) -> None:
         self.positions[position.symbol] = position
+        self.best_prices[position.symbol] = position.entry_price
         self.trades_today += 1
 
     def record_exit(self, symbol: str) -> None:
         if symbol in self.positions:
             del self.positions[symbol]
+            self.best_prices.pop(symbol, None)
             self.trades_today += 1
+
+    def _update_best_price(self, position: Position, price: float) -> None:
+        current_best = self.best_prices.get(position.symbol, position.entry_price)
+        if position.side == SignalSide.BUY:
+            self.best_prices[position.symbol] = max(current_best, price)
+        elif position.side == SignalSide.SELL:
+            self.best_prices[position.symbol] = min(current_best, price)
+
+    def _trailing_stop_reason(self, position: Position, price: float) -> str | None:
+        if self.trailing_stop_loss_pct is None:
+            return None
+
+        trail = abs(self.trailing_stop_loss_pct)
+        best_price = self.best_prices.get(position.symbol, position.entry_price)
+        best_pnl_pct = position.pnl_pct(best_price)
+        if best_pnl_pct <= 0:
+            return None
+
+        if position.side == SignalSide.BUY:
+            stop_price = best_price * (1 - trail / 100)
+            if price <= stop_price:
+                return f"trailing stop hit at {position.pnl_pct(price):.2f}% from best {best_price:.2f}"
+        elif position.side == SignalSide.SELL:
+            stop_price = best_price * (1 + trail / 100)
+            if price >= stop_price:
+                return f"trailing stop hit at {position.pnl_pct(price):.2f}% from best {best_price:.2f}"
+        return None

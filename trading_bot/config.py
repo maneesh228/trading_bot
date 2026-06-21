@@ -26,6 +26,7 @@ class RiskConfig:
     max_position_value: float
     per_trade_stop_loss_pct: float
     per_trade_target_pct: float
+    trailing_stop_loss_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -77,4 +78,3 @@ def load_config(path: str | Path) -> BotConfig:
         risk=RiskConfig(**raw["risk"]),
         watchlist=watchlist,
     )
-

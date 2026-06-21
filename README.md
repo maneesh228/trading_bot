@@ -161,5 +161,6 @@ Each stock in `watchlist` can use different strategy parameters.
 - Dry-run mode by default.
 - One open position per symbol.
 - Per-trade stop loss and target.
+- Optional trailing stop loss.
 - Daily trade count limit.
 - Intraday square-off time.
