@@ -141,7 +141,10 @@ Live intraday equity orders use Zerodha MIS market orders through Kite Connect.
 Supported strategy names:
 
 - `sma_crossover`: buys when fast SMA crosses above slow SMA and sells/exits when it crosses below.
+- `sma_trend_filter`: returns a bullish or bearish trend confirmation based on fast/slow SMA.
 - `opening_range_breakout`: buys above the opening range high and sells below the opening range low after the configured opening window.
+- `rsi_mean_reversion`: buys when RSI is oversold and exits after RSI recovers.
+- `composite`: combines multiple strategies using `all` or `majority` agreement.
 
 Each stock in `watchlist` can use different strategy parameters.
 

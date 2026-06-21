@@ -9,20 +9,19 @@ market:
 
 risk:
   max_trades_per_day: 6
-  max_position_value: 25000
+  max_position_value: 10000
   per_trade_stop_loss_pct: 0.6
   per_trade_target_pct: 1.0
 
 watchlist:
-  - symbol: INFY
-    quantity: 1
+  - symbol: IRCON
+    quantity: 72
     strategy:
-      name: sma_crossover
-      fast_window: 5
-      slow_window: 13
-  - symbol: RELIANCE
-    quantity: 1
-    strategy:
-      name: opening_range_breakout
-      opening_minutes: 15
-
+      name: composite
+      mode: all
+      strategies:
+        - name: open_high_low
+          tolerance: 0
+        - name: sma_trend_filter
+          fast_window: 5
+          slow_window: 20

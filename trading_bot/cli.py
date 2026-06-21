@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
+from trading_bot.backtest import run_backtest
 from trading_bot.broker import ZerodhaBroker, make_kite_for_login
 from trading_bot.config import load_config
 from trading_bot.engine import TradingEngine
+from trading_bot.token_store import load_runtime_credentials, make_kite_client
 
 
 def configure_logging() -> None:
@@ -44,6 +47,44 @@ def run(config_path: str) -> None:
     TradingEngine(config=config, broker=broker).run_forever()
 
 
+def backtest(config_path: str, days: int, interval: str) -> None:
+    config = load_config(config_path)
+    kite = make_kite_client(load_runtime_credentials())
+    instruments = kite.instruments(config.market.exchange)
+    token_by_symbol = {
+        item["tradingsymbol"]: item["instrument_token"]
+        for item in instruments
+    }
+
+    to_date = date.today()
+    from_date = to_date - timedelta(days=days)
+    candles_by_symbol = {}
+    for item in config.watchlist:
+        token = token_by_symbol.get(item.symbol)
+        if token is None:
+            raise RuntimeError(f"Could not find instrument token for {item.symbol}")
+        candles_by_symbol[item.symbol] = kite.historical_data(
+            instrument_token=token,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval,
+            continuous=False,
+            oi=False,
+        )
+
+    result = run_backtest(config, candles_by_symbol)
+    print(f"Backtest interval={interval} days_requested={days} trading_days={result.days}")
+    print(f"Trades={len(result.trades)} wins={result.wins} losses={result.losses} win_rate={result.win_rate:.2f}%")
+    print(f"Total PnL={result.total_pnl:.2f}")
+    for trade in result.trades:
+        print(
+            f"{trade.symbol} {trade.side.value} "
+            f"entry={trade.entry_time:%Y-%m-%d %H:%M} @{trade.entry_price:.2f} "
+            f"exit={trade.exit_time:%Y-%m-%d %H:%M} @{trade.exit_price:.2f} "
+            f"qty={trade.quantity} pnl={trade.pnl:.2f} pnl_pct={trade.pnl_pct:.2f}%"
+        )
+
+
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(prog="trading-bot")
@@ -57,6 +98,11 @@ def main() -> None:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--config", default="config.yaml")
 
+    backtest_parser = subparsers.add_parser("backtest")
+    backtest_parser.add_argument("--config", default="config.yaml")
+    backtest_parser.add_argument("--days", type=int, default=30)
+    backtest_parser.add_argument("--interval", default="5minute")
+
     args = parser.parse_args()
     if args.command == "login-url":
         login_url()
@@ -64,8 +110,9 @@ def main() -> None:
         generate_token(args.request_token)
     elif args.command == "run":
         run(args.config)
+    elif args.command == "backtest":
+        backtest(args.config, args.days, args.interval)
 
 
 if __name__ == "__main__":
     main()
-

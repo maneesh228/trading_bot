@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from statistics import mean
-from typing import Protocol
+from typing import Literal, Protocol
 
 from trading_bot.models import Signal, SignalSide, Tick
 
@@ -52,6 +52,32 @@ class SmaCrossoverStrategy:
 
 
 @dataclass
+class SmaTrendFilterStrategy:
+    fast_window: int
+    slow_window: int
+    prices: deque[float] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.fast_window >= self.slow_window:
+            raise ValueError("fast_window must be smaller than slow_window")
+        self.prices = deque(maxlen=self.slow_window)
+
+    def on_tick(self, tick: Tick) -> Signal:
+        self.prices.append(tick.price)
+        if len(self.prices) < self.slow_window:
+            return Signal(SignalSide.HOLD, "trend filter warming up")
+
+        values = list(self.prices)
+        fast = mean(values[-self.fast_window :])
+        slow = mean(values)
+        if fast > slow:
+            return Signal(SignalSide.BUY, f"bullish SMA trend fast={fast:.2f} slow={slow:.2f}")
+        if fast < slow:
+            return Signal(SignalSide.SELL, f"bearish SMA trend fast={fast:.2f} slow={slow:.2f}")
+        return Signal(SignalSide.HOLD, "flat SMA trend")
+
+
+@dataclass
 class OpeningRangeBreakoutStrategy:
     opening_minutes: int
     session_start: datetime | None = None
@@ -81,13 +107,141 @@ class OpeningRangeBreakoutStrategy:
         return Signal(SignalSide.HOLD, "inside opening range")
 
 
+@dataclass
+class OpenHighLowStrategy:
+    tolerance: float = 0.0
+
+    def on_tick(self, tick: Tick) -> Signal:
+        if tick.open is None or tick.high is None or tick.low is None:
+            return Signal(SignalSide.HOLD, "OHLC data unavailable")
+
+        if abs(tick.open - tick.low) <= self.tolerance:
+            return Signal(SignalSide.BUY, f"open equals low {tick.low:.2f}")
+        if abs(tick.open - tick.high) <= self.tolerance:
+            return Signal(SignalSide.SELL, f"open equals high {tick.high:.2f}")
+        return Signal(SignalSide.HOLD, "open is neither high nor low")
+
+
+@dataclass
+class RsiMeanReversionStrategy:
+    period: int
+    oversold: float
+    exit_level: float
+    prices: deque[float] = field(init=False)
+    in_position: bool = False
+
+    def __post_init__(self) -> None:
+        if self.period <= 1:
+            raise ValueError("period must be greater than 1")
+        if self.oversold >= self.exit_level:
+            raise ValueError("oversold must be smaller than exit_level")
+        self.prices = deque(maxlen=self.period + 1)
+
+    def on_tick(self, tick: Tick) -> Signal:
+        self.prices.append(tick.price)
+        if len(self.prices) < self.period + 1:
+            return Signal(SignalSide.HOLD, "RSI warming up")
+
+        rsi = self._rsi()
+        if not self.in_position and rsi <= self.oversold:
+            self.in_position = True
+            return Signal(SignalSide.BUY, f"RSI {rsi:.2f} below oversold {self.oversold:.2f}")
+        if self.in_position and rsi >= self.exit_level:
+            self.in_position = False
+            return Signal(SignalSide.EXIT, f"RSI {rsi:.2f} recovered above {self.exit_level:.2f}")
+        return Signal(SignalSide.HOLD, f"RSI {rsi:.2f}")
+
+    def _rsi(self) -> float:
+        values = list(self.prices)
+        gains = []
+        losses = []
+        for previous, current in zip(values, values[1:]):
+            change = current - previous
+            gains.append(max(change, 0.0))
+            losses.append(max(-change, 0.0))
+
+        average_gain = mean(gains)
+        average_loss = mean(losses)
+        if average_loss == 0:
+            return 100.0
+        relative_strength = average_gain / average_loss
+        return 100.0 - (100.0 / (1.0 + relative_strength))
+
+
+@dataclass
+class CompositeStrategy:
+    strategies: list[Strategy]
+    mode: Literal["all", "majority"] = "all"
+
+    def __post_init__(self) -> None:
+        if not self.strategies:
+            raise ValueError("composite strategy requires at least one child strategy")
+        if self.mode not in {"all", "majority"}:
+            raise ValueError("composite mode must be all or majority")
+
+    def on_tick(self, tick: Tick) -> Signal:
+        signals = [strategy.on_tick(tick) for strategy in self.strategies]
+        exit_signals = [signal for signal in signals if signal.side == SignalSide.EXIT]
+        if exit_signals:
+            return Signal(SignalSide.EXIT, self._reason("exit", exit_signals))
+
+        if self.mode == "majority":
+            return self._majority_signal(signals)
+        return self._all_signal(signals)
+
+    def _all_signal(self, signals: list[Signal]) -> Signal:
+        buy_signals = [signal for signal in signals if signal.side == SignalSide.BUY]
+        sell_signals = [signal for signal in signals if signal.side == SignalSide.SELL]
+        if len(buy_signals) == len(signals):
+            return Signal(SignalSide.BUY, self._reason("all buy", buy_signals))
+        if len(sell_signals) == len(signals):
+            return Signal(SignalSide.SELL, self._reason("all sell", sell_signals))
+        return Signal(SignalSide.HOLD, self._reason("composite hold", signals))
+
+    def _majority_signal(self, signals: list[Signal]) -> Signal:
+        buy_signals = [signal for signal in signals if signal.side == SignalSide.BUY]
+        sell_signals = [signal for signal in signals if signal.side == SignalSide.SELL]
+        threshold = (len(signals) // 2) + 1
+        if len(buy_signals) >= threshold and len(buy_signals) > len(sell_signals):
+            return Signal(SignalSide.BUY, self._reason("majority buy", buy_signals))
+        if len(sell_signals) >= threshold and len(sell_signals) > len(buy_signals):
+            return Signal(SignalSide.SELL, self._reason("majority sell", sell_signals))
+        return Signal(SignalSide.HOLD, self._reason("composite hold", signals))
+
+    @staticmethod
+    def _reason(prefix: str, signals: list[Signal]) -> str:
+        details = "; ".join(f"{signal.side.value}: {signal.reason}" for signal in signals)
+        return f"{prefix}: {details}"
+
+
 def build_strategy(name: str, params: dict) -> Strategy:
     if name == "sma_crossover":
         return SmaCrossoverStrategy(
             fast_window=int(params.get("fast_window", 5)),
             slow_window=int(params.get("slow_window", 13)),
         )
+    if name == "sma_trend_filter":
+        return SmaTrendFilterStrategy(
+            fast_window=int(params.get("fast_window", 5)),
+            slow_window=int(params.get("slow_window", 13)),
+        )
     if name == "opening_range_breakout":
         return OpeningRangeBreakoutStrategy(opening_minutes=int(params.get("opening_minutes", 15)))
+    if name == "open_high_low":
+        return OpenHighLowStrategy(tolerance=float(params.get("tolerance", 0.0)))
+    if name == "rsi_mean_reversion":
+        return RsiMeanReversionStrategy(
+            period=int(params.get("period", 14)),
+            oversold=float(params.get("oversold", 30)),
+            exit_level=float(params.get("exit_level", 50)),
+        )
+    if name == "composite":
+        raw_strategies = params.get("strategies", [])
+        return CompositeStrategy(
+            strategies=[
+                build_strategy(str(strategy["name"]), {key: value for key, value in strategy.items() if key != "name"})
+                for strategy in raw_strategies
+            ],
+            mode=str(params.get("mode", "all")),
+        )
     raise ValueError(f"Unsupported strategy: {name}")
-

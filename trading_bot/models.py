@@ -17,6 +17,9 @@ class Tick:
     symbol: str
     price: float
     timestamp: datetime
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
 
 
 @dataclass(frozen=True)
@@ -55,4 +58,3 @@ class OrderResult:
     order_id: str
     request: OrderRequest
     live: bool
-
