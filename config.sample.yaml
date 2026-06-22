@@ -14,10 +14,14 @@ risk:
   per_trade_target_pct: 1.0
   trailing_stop_loss_pct: 0.4
 
+execution:
+  trade_selection: single_best
+  position_sizing: max_position_value
+
 watchlist:
   - symbol: IRCON
-    quantity: 72
-    strategy:
+    quantity: 1
+    strategy: &ohl_sma_strategy
       name: composite
       mode: all
       strategies:
@@ -26,3 +30,21 @@ watchlist:
         - name: sma_trend_filter
           fast_window: 5
           slow_window: 20
+  - symbol: ASHOKLEY
+    quantity: 1
+    strategy: *ohl_sma_strategy
+  - symbol: AARTIIND
+    quantity: 1
+    strategy: *ohl_sma_strategy
+  - symbol: MOTHERSON
+    quantity: 1
+    strategy: *ohl_sma_strategy
+  - symbol: CANBK
+    quantity: 1
+    strategy: *ohl_sma_strategy
+  - symbol: PETRONET
+    quantity: 1
+    strategy: *ohl_sma_strategy
+  - symbol: IOC
+    quantity: 1
+    strategy: *ohl_sma_strategy

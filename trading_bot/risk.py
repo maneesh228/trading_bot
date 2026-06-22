@@ -21,6 +21,8 @@ class RiskManager:
             return False, "hold signal"
         if request.side == SignalSide.EXIT:
             return False, "exit must be converted to a closing order"
+        if request.quantity <= 0:
+            return False, "quantity must be greater than zero"
         if self.trades_today >= self.max_trades_per_day:
             return False, "daily trade limit reached"
         if request.quantity * request.price > self.max_position_value:

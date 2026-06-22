@@ -43,10 +43,17 @@ class WatchSymbol:
 
 
 @dataclass(frozen=True)
+class ExecutionConfig:
+    trade_selection: str = "per_symbol"
+    position_sizing: str = "configured_quantity"
+
+
+@dataclass(frozen=True)
 class BotConfig:
     broker: BrokerConfig
     market: MarketConfig
     risk: RiskConfig
+    execution: ExecutionConfig
     watchlist: list[WatchSymbol]
 
 
@@ -76,5 +83,6 @@ def load_config(path: str | Path) -> BotConfig:
         broker=BrokerConfig(**raw["broker"]),
         market=MarketConfig(**raw["market"]),
         risk=RiskConfig(**raw["risk"]),
+        execution=ExecutionConfig(**raw.get("execution", {})),
         watchlist=watchlist,
     )

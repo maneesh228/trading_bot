@@ -5,6 +5,7 @@ from datetime import date, datetime, time
 from typing import Any
 
 from trading_bot.config import BotConfig
+from trading_bot.execution import quantity_for_capital, signal_strength
 from trading_bot.models import OrderRequest, Position, SignalSide, Tick
 from trading_bot.risk import RiskManager
 from trading_bot.strategies import build_strategy
@@ -113,50 +114,85 @@ def _run_day(
     daily_ticks.sort(key=lambda tick: tick.timestamp)
 
     square_off = _parse_time(config.market.square_off_time)
-    for tick in daily_ticks:
-        if tick.timestamp.time() >= square_off:
-            _close_position(tick, risk, open_entries, entry_reasons, trades, "scheduled square off")
+    for timestamp in sorted({tick.timestamp for tick in daily_ticks}):
+        candidates: list[tuple[Tick, SignalSide, str]] = []
+        ticks_at_time = [tick for tick in daily_ticks if tick.timestamp == timestamp]
+        for tick in ticks_at_time:
+            if tick.timestamp.time() >= square_off:
+                _close_position(tick, risk, open_entries, entry_reasons, trades, "scheduled square off")
+                continue
+
+            risk_reason = risk.exit_signal_for_risk(tick.symbol, tick.price)
+            if risk_reason:
+                _close_position(tick, risk, open_entries, entry_reasons, trades, risk_reason)
+                continue
+
+            signal = strategies[tick.symbol].on_tick(tick)
+            if signal.side == SignalSide.HOLD:
+                continue
+            if signal.side == SignalSide.EXIT:
+                _close_position(tick, risk, open_entries, entry_reasons, trades, signal.reason)
+                continue
+            candidates.append((tick, signal.side, signal.reason))
+
+        if config.execution.trade_selection == "single_best":
+            if risk.positions or not candidates:
+                continue
+            selected = max(
+                candidates,
+                key=lambda candidate: (
+                    signal_strength(candidate[0], candidate[1]),
+                    candidate[0].price,
+                    candidate[0].symbol,
+                ),
+            )
+            _open_position(config, selected, quantities, risk, open_entries, entry_reasons)
             continue
 
-        risk_reason = risk.exit_signal_for_risk(tick.symbol, tick.price)
-        if risk_reason:
-            _close_position(tick, risk, open_entries, entry_reasons, trades, risk_reason)
-            continue
-
-        signal = strategies[tick.symbol].on_tick(tick)
-        if signal.side == SignalSide.HOLD:
-            continue
-        if signal.side == SignalSide.EXIT:
-            _close_position(tick, risk, open_entries, entry_reasons, trades, signal.reason)
-            continue
-
-        request = OrderRequest(
-            symbol=tick.symbol,
-            quantity=quantities[tick.symbol],
-            side=signal.side,
-            price=tick.price,
-            reason=signal.reason,
-        )
-        allowed, _ = risk.can_place(request)
-        if not allowed:
-            continue
-
-        position = Position(
-            symbol=tick.symbol,
-            quantity=request.quantity,
-            side=request.side,
-            entry_price=tick.price,
-            entry_time=tick.timestamp,
-        )
-        risk.record_entry(position)
-        open_entries[tick.symbol] = position
-        entry_reasons[tick.symbol] = signal.reason
+        for candidate in candidates:
+            _open_position(config, candidate, quantities, risk, open_entries, entry_reasons)
 
     for tick in reversed(daily_ticks):
         if tick.symbol in open_entries:
             _close_position(tick, risk, open_entries, entry_reasons, trades, "end of data square off")
 
     return trades
+
+
+def _open_position(
+    config: BotConfig,
+    candidate: tuple[Tick, SignalSide, str],
+    quantities: dict[str, int],
+    risk: RiskManager,
+    open_entries: dict[str, Position],
+    entry_reasons: dict[str, str],
+) -> None:
+    tick, side, reason = candidate
+    quantity = quantities[tick.symbol]
+    if config.execution.position_sizing == "max_position_value":
+        quantity = quantity_for_capital(tick.price, config.risk.max_position_value)
+
+    request = OrderRequest(
+        symbol=tick.symbol,
+        quantity=quantity,
+        side=side,
+        price=tick.price,
+        reason=reason,
+    )
+    allowed, _ = risk.can_place(request)
+    if not allowed:
+        return
+
+    position = Position(
+        symbol=tick.symbol,
+        quantity=request.quantity,
+        side=request.side,
+        entry_price=tick.price,
+        entry_time=tick.timestamp,
+    )
+    risk.record_entry(position)
+    open_entries[tick.symbol] = position
+    entry_reasons[tick.symbol] = reason
 
 
 def _close_position(

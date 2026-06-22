@@ -6,8 +6,9 @@ from datetime import datetime
 
 from trading_bot.broker import Broker
 from trading_bot.config import BotConfig
+from trading_bot.execution import quantity_for_capital, signal_strength
 from trading_bot.journal import TradeJournal
-from trading_bot.models import OrderRequest, Position, SignalSide
+from trading_bot.models import OrderRequest, Position, Signal, SignalSide, Tick
 from trading_bot.risk import RiskManager
 from trading_bot.strategies import Strategy, build_strategy
 
@@ -52,6 +53,7 @@ class TradingEngine:
 
     def run_once(self, symbols: list[str]) -> None:
         ticks = self.broker.ltp(symbols)
+        candidates: list[tuple[str, Tick, Signal]] = []
         for symbol, tick in ticks.items():
             risk_reason = self.risk.exit_signal_for_risk(symbol, tick.price)
             if risk_reason:
@@ -75,43 +77,14 @@ class TradingEngine:
                 self._exit_position(symbol, tick.price, signal.reason)
                 continue
 
-            request = OrderRequest(
-                symbol=symbol,
-                quantity=self.quantities[symbol],
-                side=signal.side,
-                price=tick.price,
-                reason=signal.reason,
-            )
-            allowed, reason = self.risk.can_place(request)
-            if not allowed:
-                logger.info("Skipped %s %s: %s", signal.side, symbol, reason)
-                self._journal(
-                    "order_skipped",
-                    {
-                        "request": request,
-                        "reason": reason,
-                        "tick": tick,
-                    },
-                )
-                continue
+            candidates.append((symbol, tick, signal))
 
-            order = self.broker.place_order(request)
-            self._journal(
-                "order_placed",
-                {
-                    "order": order,
-                    "tick": tick,
-                },
-            )
-            self.risk.record_entry(
-                Position(
-                    symbol=symbol,
-                    quantity=request.quantity,
-                    side=request.side,
-                    entry_price=tick.price,
-                    entry_time=tick.timestamp,
-                )
-            )
+        if self.config.execution.trade_selection == "single_best":
+            self._place_best_candidate(candidates)
+            return
+
+        for symbol, tick, signal in candidates:
+            self._place_entry(symbol, tick, signal)
 
     def square_off_all(self) -> None:
         logger.info("Square-off time reached")
@@ -159,6 +132,82 @@ class TradingEngine:
             },
         )
         self.risk.record_exit(symbol)
+
+    def _place_best_candidate(self, candidates: list[tuple[str, Tick, Signal]]) -> None:
+        if not candidates:
+            return
+        if self.risk.positions:
+            for symbol, tick, signal in candidates:
+                request = self._entry_request(symbol, tick, signal)
+                self._journal(
+                    "order_skipped",
+                    {
+                        "request": request,
+                        "reason": "single_best mode already has an open position",
+                        "tick": tick,
+                    },
+                )
+            return
+
+        symbol, tick, signal = max(
+            candidates,
+            key=lambda candidate: (
+                signal_strength(candidate[1], candidate[2].side),
+                candidate[1].price,
+                candidate[0],
+            ),
+        )
+        strength = signal_strength(tick, signal.side)
+        selected_signal = Signal(
+            signal.side,
+            f"{signal.reason} | selected best candidate strength={strength:.2f}%",
+        )
+        self._place_entry(symbol, tick, selected_signal)
+
+    def _place_entry(self, symbol: str, tick: Tick, signal: Signal) -> None:
+        request = self._entry_request(symbol, tick, signal)
+        allowed, reason = self.risk.can_place(request)
+        if not allowed:
+            logger.info("Skipped %s %s: %s", signal.side, symbol, reason)
+            self._journal(
+                "order_skipped",
+                {
+                    "request": request,
+                    "reason": reason,
+                    "tick": tick,
+                },
+            )
+            return
+
+        order = self.broker.place_order(request)
+        self._journal(
+            "order_placed",
+            {
+                "order": order,
+                "tick": tick,
+            },
+        )
+        self.risk.record_entry(
+            Position(
+                symbol=symbol,
+                quantity=request.quantity,
+                side=request.side,
+                entry_price=tick.price,
+                entry_time=tick.timestamp,
+            )
+        )
+
+    def _entry_request(self, symbol: str, tick: Tick, signal: Signal) -> OrderRequest:
+        quantity = self.quantities[symbol]
+        if self.config.execution.position_sizing == "max_position_value":
+            quantity = quantity_for_capital(tick.price, self.config.risk.max_position_value)
+        return OrderRequest(
+            symbol=symbol,
+            quantity=quantity,
+            side=signal.side,
+            price=tick.price,
+            reason=signal.reason,
+        )
 
     def _should_square_off(self) -> bool:
         now = datetime.now().strftime("%H:%M")
