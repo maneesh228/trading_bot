@@ -59,10 +59,27 @@ def kite_postback_handler(event: dict[str, Any], context: Any) -> dict[str, Any]
             "event_id": {"S": event.get("requestContext", {}).get("requestId", context.aws_request_id)},
             "created_at": {"S": datetime.now(timezone.utc).isoformat()},
             "payload": {"S": json.dumps(payload)},
+            "raw_body": {"S": event.get("body") or ""},
+            "headers": {"S": json.dumps(event.get("headers") or {})},
+            "query_string_parameters": {"S": json.dumps(event.get("queryStringParameters") or {})},
+            "is_base64_encoded": {"S": str(bool(event.get("isBase64Encoded")))},
+            "request_context": {"S": json.dumps(_postback_request_context(event))},
         }
         boto3.client("dynamodb").put_item(TableName=table_name, Item=item)
 
     return _json_response({"ok": True})
+
+
+def _postback_request_context(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("requestContext") or {}
+    http = context.get("http") or {}
+    return {
+        "request_id": context.get("requestId"),
+        "source_ip": http.get("sourceIp"),
+        "method": http.get("method"),
+        "path": http.get("path"),
+        "user_agent": http.get("userAgent"),
+    }
 
 
 def _load_lambda_credentials():
