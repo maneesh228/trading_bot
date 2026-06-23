@@ -20,6 +20,9 @@ class Tick:
     open: float | None = None
     high: float | None = None
     low: float | None = None
+    close: float | None = None
+    volume: float | None = None
+    vwap: float | None = None
 
 
 @dataclass(frozen=True)

@@ -57,7 +57,7 @@ class TradingEngine:
         for symbol, tick in ticks.items():
             risk_reason = self.risk.exit_signal_for_risk(symbol, tick.price)
             if risk_reason:
-                self._exit_position(symbol, tick.price, risk_reason)
+                self._exit_position(symbol, tick.price, risk_reason, tick)
                 continue
 
             signal = self.strategies[symbol].on_tick(tick)
@@ -74,7 +74,7 @@ class TradingEngine:
                 logger.debug("%s hold: %s", symbol, signal.reason)
                 continue
             if signal.side == SignalSide.EXIT:
-                self._exit_position(symbol, tick.price, signal.reason)
+                self._exit_position(symbol, tick.price, signal.reason, tick)
                 continue
 
             candidates.append((symbol, tick, signal))
@@ -91,9 +91,9 @@ class TradingEngine:
         self._journal("square_off_started", {"symbols": list(self.risk.positions)})
         ticks = self.broker.ltp(list(self.risk.positions))
         for symbol, position in list(self.risk.positions.items()):
-            self._exit_position(symbol, ticks[symbol].price, "scheduled square off")
+            self._exit_position(symbol, ticks[symbol].price, "scheduled square off", ticks[symbol])
 
-    def _exit_position(self, symbol: str, price: float, reason: str) -> None:
+    def _exit_position(self, symbol: str, price: float, reason: str, tick: Tick | None = None) -> None:
         position = self.risk.positions.get(symbol)
         if position is None:
             logger.info("No open position to exit for %s", symbol)
@@ -129,6 +129,7 @@ class TradingEngine:
                 "exit_price": price,
                 "exit_reason": reason,
                 "pnl_pct": pnl,
+                "tick": tick,
             },
         )
         self.risk.record_exit(symbol)

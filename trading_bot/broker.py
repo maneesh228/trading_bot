@@ -23,6 +23,7 @@ class Broker:
 class ZerodhaBroker(Broker):
     exchange: str
     live_trading: bool
+    market_protection_pct: float | None = None
 
     def __post_init__(self) -> None:
         self.kite = make_kite_client(load_runtime_credentials())
@@ -30,58 +31,56 @@ class ZerodhaBroker(Broker):
         self._ohlc_cache: dict[str, tuple[datetime, Tick]] = {}
 
     def ltp(self, symbols: list[str]) -> dict[str, Tick]:
-        keys = [f"{self.exchange}:{symbol}" for symbol in symbols]
-        quotes = self.kite.ltp(keys)
         now = datetime.now()
         ticks = {}
         for symbol in symbols:
-            key = f"{self.exchange}:{symbol}"
-            price = float(quotes[key]["last_price"])
-            ticks[symbol] = self._latest_tick_with_ohlc(symbol, price, now)
+            tick = self._latest_completed_candle_tick(symbol, now)
+            if tick is not None:
+                ticks[symbol] = tick
         return ticks
 
-    def _latest_tick_with_ohlc(self, symbol: str, price: float, now: datetime) -> Tick:
-        bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+    def _latest_completed_candle_tick(self, symbol: str, now: datetime) -> Tick | None:
+        current_bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+        completed_bucket = current_bucket - timedelta(minutes=5)
         cached = self._ohlc_cache.get(symbol)
-        if cached and cached[0] == bucket:
-            cached_tick = cached[1]
-            return Tick(
-                symbol=symbol,
-                price=price,
-                timestamp=now,
-                open=cached_tick.open,
-                high=cached_tick.high,
-                low=cached_tick.low,
-            )
+        if cached and cached[0] == completed_bucket:
+            return cached[1]
 
         token = self._instrument_token(symbol)
         if token is None:
-            return Tick(symbol=symbol, price=price, timestamp=now)
+            return None
         try:
             candles = self.kite.historical_data(
                 instrument_token=token,
-                from_date=now - timedelta(minutes=30),
-                to_date=now,
+                from_date=now.replace(hour=9, minute=15, second=0, microsecond=0),
+                to_date=completed_bucket,
                 interval="5minute",
                 continuous=False,
                 oi=False,
             )
         except Exception as exc:
             logger.warning("Could not fetch OHLC candle for %s: %s", symbol, exc)
-            return Tick(symbol=symbol, price=price, timestamp=now)
+            return None
 
         if not candles:
-            return Tick(symbol=symbol, price=price, timestamp=now)
+            return None
         candle = candles[-1]
+        candle_time = candle["date"]
+        if not isinstance(candle_time, datetime):
+            candle_time = datetime.fromisoformat(str(candle_time))
+        close = float(candle["close"])
         tick = Tick(
             symbol=symbol,
-            price=price,
-            timestamp=now,
+            price=close,
+            timestamp=candle_time,
             open=float(candle["open"]),
             high=float(candle["high"]),
             low=float(candle["low"]),
+            close=close,
+            volume=float(candle.get("volume", 0) or 0),
+            vwap=_vwap(candles),
         )
-        self._ohlc_cache[symbol] = (bucket, tick)
+        self._ohlc_cache[symbol] = (completed_bucket, tick)
         return tick
 
     def _instrument_token(self, symbol: str) -> int | None:
@@ -111,6 +110,7 @@ class ZerodhaBroker(Broker):
             order_type=self.kite.ORDER_TYPE_MARKET,
             validity=self.kite.VALIDITY_DAY,
             tag="intraday_bot",
+            market_protection=self.market_protection_pct,
         )
         logger.info("LIVE ORDER %s %s x%s order_id=%s", request.side, request.symbol, request.quantity, order_id)
         return OrderResult(order_id=str(order_id), request=request, live=True)
@@ -119,3 +119,18 @@ class ZerodhaBroker(Broker):
 def make_kite_for_login():
     credentials = load_local_credentials()
     return make_kite_client(credentials)
+
+
+def _vwap(candles: list[dict]) -> float | None:
+    weighted_value = 0.0
+    volume_total = 0.0
+    for candle in candles:
+        volume = float(candle.get("volume", 0) or 0)
+        if volume <= 0:
+            continue
+        typical_price = (float(candle["high"]) + float(candle["low"]) + float(candle["close"])) / 3
+        weighted_value += typical_price * volume
+        volume_total += volume
+    if volume_total <= 0:
+        return None
+    return weighted_value / volume_total

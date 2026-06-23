@@ -124,6 +124,14 @@ The bot also writes structured trade journal records to:
 
 Each line is one JSON event for later analysis, including signals, skipped orders, placed orders, exits, and square-off events.
 
+After market close, generate a learning report from the journal:
+
+```bash
+python -m trading_bot.cli learning-report --journal /opt/ai_trading_agent/data/trade_journal.jsonl --date YYYY-MM-DD
+```
+
+The report summarizes closed trades, open trades, gross P&L, symbol/candle performance, max favorable/adverse movement, and the indicator snapshot recorded at entry.
+
 ## Run In Dry-Run Mode
 
 ```powershell

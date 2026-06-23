@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -12,6 +12,7 @@ from trading_bot.broker import ZerodhaBroker, make_kite_for_login
 from trading_bot.config import load_config
 from trading_bot.engine import TradingEngine
 from trading_bot.journal import TradeJournal
+from trading_bot.learning_report import generate_learning_report
 from trading_bot.token_store import load_runtime_credentials, make_kite_client
 
 
@@ -44,6 +45,7 @@ def run(config_path: str, journal_path: str) -> None:
     broker = ZerodhaBroker(
         exchange=config.market.exchange,
         live_trading=config.broker.live_trading,
+        market_protection_pct=config.broker.market_protection_pct,
     )
     TradingEngine(config=config, broker=broker, journal=TradeJournal(journal_path)).run_forever()
 
@@ -86,6 +88,11 @@ def backtest(config_path: str, days: int, interval: str) -> None:
         )
 
 
+def learning_report(journal_path: str, report_date: str | None) -> None:
+    parsed_date = datetime.fromisoformat(report_date).date() if report_date else None
+    print(generate_learning_report(journal_path, parsed_date))
+
+
 def main() -> None:
     configure_logging()
     parser = argparse.ArgumentParser(prog="trading-bot")
@@ -105,6 +112,10 @@ def main() -> None:
     backtest_parser.add_argument("--days", type=int, default=30)
     backtest_parser.add_argument("--interval", default="5minute")
 
+    report_parser = subparsers.add_parser("learning-report")
+    report_parser.add_argument("--journal", default="data/trade_journal.jsonl")
+    report_parser.add_argument("--date")
+
     args = parser.parse_args()
     if args.command == "login-url":
         login_url()
@@ -114,6 +125,8 @@ def main() -> None:
         run(args.config, args.journal)
     elif args.command == "backtest":
         backtest(args.config, args.days, args.interval)
+    elif args.command == "learning-report":
+        learning_report(args.journal, args.date)
 
 
 if __name__ == "__main__":

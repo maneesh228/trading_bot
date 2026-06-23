@@ -11,6 +11,7 @@ import yaml
 class BrokerConfig:
     name: str
     live_trading: bool
+    market_protection_pct: float | None = None
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pycache_tmp/
+test_learning_report_journal.jsonl
 .venv/
 .venv-1/
 .aws-sam/

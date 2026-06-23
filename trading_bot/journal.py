@@ -29,8 +29,43 @@ class TradeJournal:
 def _enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
     tick = payload.get("tick")
     if isinstance(tick, Tick):
-        return {**payload, "candle_pattern": classify_candle(tick)}
+        return {
+            **payload,
+            "candle_pattern": classify_candle(tick),
+            "indicator_snapshot": indicator_snapshot(tick),
+        }
     return payload
+
+
+def indicator_snapshot(tick: Tick) -> dict[str, Any]:
+    close = tick.close if tick.close is not None else tick.price
+    snapshot: dict[str, Any] = {
+        "symbol": tick.symbol,
+        "price": tick.price,
+        "timestamp": tick.timestamp,
+        "open": tick.open,
+        "high": tick.high,
+        "low": tick.low,
+        "close": close,
+        "volume": tick.volume,
+        "vwap": tick.vwap,
+    }
+
+    if tick.open is not None and tick.high is not None and tick.low is not None:
+        candle_range = tick.high - tick.low
+        snapshot["candle_range"] = round(candle_range, 4)
+        if candle_range > 0:
+            snapshot["body_pct"] = round((abs(close - tick.open) / candle_range) * 100, 2)
+        else:
+            snapshot["body_pct"] = 0.0
+
+    if tick.vwap is not None and tick.vwap > 0:
+        snapshot["price_vs_vwap_pct"] = round(((tick.price - tick.vwap) / tick.vwap) * 100, 4)
+
+    if tick.open is not None and tick.open > 0:
+        snapshot["price_vs_open_pct"] = round(((tick.price - tick.open) / tick.open) * 100, 4)
+
+    return snapshot
 
 
 def classify_candle(tick: Tick) -> dict[str, Any]:

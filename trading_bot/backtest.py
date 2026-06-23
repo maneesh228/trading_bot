@@ -98,19 +98,34 @@ def _run_day(
 
     daily_ticks = []
     for symbol, candles in candles_by_symbol.items():
-        for candle in candles:
+        weighted_value = 0.0
+        volume_total = 0.0
+        symbol_day_candles = sorted(
+            [candle for candle in candles if _candle_time(candle).date() == trading_day],
+            key=_candle_time,
+        )
+        for candle in symbol_day_candles:
+            volume = float(candle.get("volume", 0) or 0)
+            close = float(candle["close"])
+            if volume > 0:
+                typical_price = (float(candle["high"]) + float(candle["low"]) + close) / 3
+                weighted_value += typical_price * volume
+                volume_total += volume
+            vwap = weighted_value / volume_total if volume_total > 0 else None
             timestamp = _candle_time(candle)
-            if timestamp.date() == trading_day:
-                daily_ticks.append(
-                    Tick(
-                        symbol=symbol,
-                        price=float(candle["close"]),
-                        timestamp=timestamp,
-                        open=float(candle["open"]),
-                        high=float(candle["high"]),
-                        low=float(candle["low"]),
-                    )
+            daily_ticks.append(
+                Tick(
+                    symbol=symbol,
+                    price=close,
+                    timestamp=timestamp,
+                    open=float(candle["open"]),
+                    high=float(candle["high"]),
+                    low=float(candle["low"]),
+                    close=close,
+                    volume=volume,
+                    vwap=vwap,
                 )
+            )
     daily_ticks.sort(key=lambda tick: tick.timestamp)
 
     square_off = _parse_time(config.market.square_off_time)

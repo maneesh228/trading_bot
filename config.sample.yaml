@@ -1,6 +1,7 @@
 broker:
   name: zerodha
   live_trading: false
+  market_protection_pct: 2
 
 market:
   exchange: NSE
@@ -8,7 +9,7 @@ market:
   square_off_time: "15:15"
 
 risk:
-  max_trades_per_day: 6
+  max_trades_per_day: 100
   max_position_value: 10000
   per_trade_stop_loss_pct: 0.6
   per_trade_target_pct: 1.0
@@ -21,30 +22,44 @@ execution:
 watchlist:
   - symbol: IRCON
     quantity: 1
-    strategy: &ohl_sma_strategy
+    strategy: &support_macd_volume_strategy
       name: composite
       mode: all
       strategies:
-        - name: open_high_low
-          tolerance: 0
-        - name: sma_trend_filter
-          fast_window: 5
-          slow_window: 20
+        - name: support_resistance_breakout
+          lookback: 20
+          buffer_pct: 0.03
+        - name: macd
+          fast_window: 12
+          slow_window: 26
+          signal_window: 9
+          mode: trend
+        - name: time_after
+          after: "09:45"
+        - name: volume_spike
+          lookback: 20
+          multiplier: 1.3
+          min_volume: 50000
+        - name: candle_body_filter
+          min_body_pct: 10
+          reject_flat: true
+        - name: vwap_filter
+          min_distance_pct: 0.02
   - symbol: ASHOKLEY
     quantity: 1
-    strategy: *ohl_sma_strategy
+    strategy: *support_macd_volume_strategy
   - symbol: AARTIIND
     quantity: 1
-    strategy: *ohl_sma_strategy
+    strategy: *support_macd_volume_strategy
   - symbol: MOTHERSON
     quantity: 1
-    strategy: *ohl_sma_strategy
+    strategy: *support_macd_volume_strategy
   - symbol: CANBK
     quantity: 1
-    strategy: *ohl_sma_strategy
+    strategy: *support_macd_volume_strategy
   - symbol: PETRONET
     quantity: 1
-    strategy: *ohl_sma_strategy
+    strategy: *support_macd_volume_strategy
   - symbol: IOC
     quantity: 1
-    strategy: *ohl_sma_strategy
+    strategy: *support_macd_volume_strategy
