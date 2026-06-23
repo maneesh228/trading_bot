@@ -15,6 +15,8 @@ from trading_bot.strategies import (
     SmaTrendFilterStrategy,
     SupportResistanceBreakoutStrategy,
     TimeAfterStrategy,
+    TimeBeforeStrategy,
+    TrendRegimeStrategy,
     VolumeSpikeStrategy,
     VwapFilterStrategy,
 )
@@ -82,9 +84,36 @@ def test_time_volume_body_and_vwap_filters():
     tick = Tick("CANBK", 101, now, open=100, high=102, low=99, close=101, volume=100000, vwap=100)
 
     assert TimeAfterStrategy("09:45").on_tick(tick).side == SignalSide.BUY
+    assert TimeBeforeStrategy("14:30").on_tick(tick).side == SignalSide.BUY
     assert MinVolumeStrategy(50000).on_tick(tick).side == SignalSide.BUY
     assert CandleBodyFilterStrategy(min_body_pct=10).on_tick(tick).side == SignalSide.BUY
     assert VwapFilterStrategy(min_distance_pct=0.02).on_tick(tick).side == SignalSide.BUY
+
+
+def test_time_before_blocks_late_entries():
+    late_tick = Tick("CANBK", 101, datetime(2026, 6, 22, 14, 30))
+
+    assert TimeBeforeStrategy("14:30").on_tick(late_tick).side == SignalSide.HOLD
+
+
+def test_trend_regime_classifies_uptrend_downtrend_and_sideways():
+    now = datetime.now()
+    uptrend = TrendRegimeStrategy(lookback=3, min_trend_pct=1)
+    downtrend = TrendRegimeStrategy(lookback=3, min_trend_pct=1)
+    sideways = TrendRegimeStrategy(lookback=3, min_trend_pct=1)
+
+    for price in [100, 100.5]:
+        assert uptrend.on_tick(Tick("INFY", price, now)).side == SignalSide.HOLD
+
+    assert uptrend.on_tick(Tick("INFY", 101.2, now)).side == SignalSide.BUY
+
+    for price in [100, 99.5, 98.8]:
+        signal = downtrend.on_tick(Tick("INFY", price, now))
+    assert signal.side == SignalSide.SELL
+
+    for price in [100, 100.2, 100.4]:
+        signal = sideways.on_tick(Tick("INFY", price, now))
+    assert signal.side == SignalSide.HOLD
 
 
 def test_candle_body_filter_rejects_flat_candle():

@@ -226,6 +226,50 @@ class TimeAfterStrategy:
 
 
 @dataclass
+class TimeBeforeStrategy:
+    before: str
+
+    def __post_init__(self) -> None:
+        self._before_time = _parse_time(self.before)
+
+    def on_tick(self, tick: Tick) -> Signal:
+        if tick.timestamp.time() < self._before_time:
+            return Signal(SignalSide.BUY, f"time is before {self.before}")
+        return Signal(SignalSide.HOLD, f"entries closed after {self.before}")
+
+
+@dataclass
+class TrendRegimeStrategy:
+    lookback: int = 6
+    min_trend_pct: float = 0.15
+    prices: deque[float] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.lookback <= 1:
+            raise ValueError("lookback must be greater than 1")
+        if self.min_trend_pct < 0:
+            raise ValueError("min_trend_pct must be non-negative")
+        self.prices = deque(maxlen=self.lookback)
+
+    def on_tick(self, tick: Tick) -> Signal:
+        self.prices.append(tick.price)
+        if len(self.prices) < self.lookback:
+            return Signal(SignalSide.HOLD, "trend regime warming up")
+
+        values = list(self.prices)
+        start = values[0]
+        if start <= 0:
+            return Signal(SignalSide.HOLD, "trend regime unavailable")
+
+        trend_pct = ((values[-1] - start) / start) * 100
+        if trend_pct >= self.min_trend_pct:
+            return Signal(SignalSide.BUY, f"uptrend {trend_pct:.2f}% over {self.lookback} candles")
+        if trend_pct <= -self.min_trend_pct:
+            return Signal(SignalSide.SELL, f"downtrend {trend_pct:.2f}% over {self.lookback} candles")
+        return Signal(SignalSide.HOLD, f"sideways trend {trend_pct:.2f}% over {self.lookback} candles")
+
+
+@dataclass
 class MinVolumeStrategy:
     min_volume: float
 
@@ -461,6 +505,13 @@ def build_strategy(name: str, params: dict) -> Strategy:
         return OpenHighLowStrategy(tolerance=float(params.get("tolerance", 0.0)))
     if name == "time_after":
         return TimeAfterStrategy(after=str(params.get("after", "09:30")))
+    if name == "time_before":
+        return TimeBeforeStrategy(before=str(params.get("before", "14:30")))
+    if name == "trend_regime":
+        return TrendRegimeStrategy(
+            lookback=int(params.get("lookback", 6)),
+            min_trend_pct=float(params.get("min_trend_pct", 0.15)),
+        )
     if name == "min_volume":
         return MinVolumeStrategy(min_volume=float(params.get("min_volume", 0)))
     if name == "volume_spike":
