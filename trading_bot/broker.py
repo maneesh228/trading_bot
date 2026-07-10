@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ class ZerodhaBroker(Broker):
         self.kite = make_kite_client(load_runtime_credentials())
         self._instrument_tokens: dict[str, int] | None = None
         self._ohlc_cache: dict[str, tuple[datetime, Tick]] = {}
+        self._higher_trend_cache: dict[tuple[str, date], float | None] = {}
 
     def ltp(self, symbols: list[str]) -> dict[str, Tick]:
         now = datetime.now()
@@ -79,9 +81,38 @@ class ZerodhaBroker(Broker):
             close=close,
             volume=float(candle.get("volume", 0) or 0),
             vwap=_vwap(candles),
+            higher_timeframe_trend_pct=self._higher_timeframe_trend_pct(symbol, now),
         )
         self._ohlc_cache[symbol] = (completed_bucket, tick)
         return tick
+
+    def _higher_timeframe_trend_pct(self, symbol: str, now: datetime) -> float | None:
+        cache_key = (symbol, now.date())
+        if cache_key in self._higher_trend_cache:
+            return self._higher_trend_cache[cache_key]
+
+        token = self._instrument_token(symbol)
+        if token is None:
+            self._higher_trend_cache[cache_key] = None
+            return None
+
+        try:
+            candles = self.kite.historical_data(
+                instrument_token=token,
+                from_date=now.date() - timedelta(days=14),
+                to_date=now.date() - timedelta(days=1),
+                interval="day",
+                continuous=False,
+                oi=False,
+            )
+        except Exception as exc:
+            logger.warning("Could not fetch higher timeframe trend for %s: %s", symbol, exc)
+            self._higher_trend_cache[cache_key] = None
+            return None
+
+        trend_pct = _close_to_close_trend_pct(candles)
+        self._higher_trend_cache[cache_key] = trend_pct
+        return trend_pct
 
     def _instrument_token(self, symbol: str) -> int | None:
         if self._instrument_tokens is None:
@@ -134,3 +165,13 @@ def _vwap(candles: list[dict]) -> float | None:
     if volume_total <= 0:
         return None
     return weighted_value / volume_total
+
+
+def _close_to_close_trend_pct(candles: list[dict]) -> float | None:
+    if len(candles) < 2:
+        return None
+    first = float(candles[0]["close"])
+    last = float(candles[-1]["close"])
+    if first <= 0:
+        return None
+    return ((last - first) / first) * 100

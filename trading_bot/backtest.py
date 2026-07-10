@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, time
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from trading_bot.config import BotConfig
+from trading_bot.confirmation import PendingEntry, evaluate_entry_confirmation
+from trading_bot.config import BotConfig, ConfirmationConfig
 from trading_bot.execution import quantity_for_capital, signal_strength
 from trading_bot.models import OrderRequest, Position, SignalSide, Tick
 from trading_bot.risk import RiskManager
@@ -91,10 +92,18 @@ def _run_day(
         stop_loss_pct=config.risk.per_trade_stop_loss_pct,
         target_pct=config.risk.per_trade_target_pct,
         trailing_stop_loss_pct=config.risk.trailing_stop_loss_pct,
+        max_daily_loss_amount=config.risk.max_daily_loss_amount,
+        max_daily_losses=config.risk.max_daily_losses,
     )
     open_entries: dict[str, Position] = {}
     entry_reasons: dict[str, str] = {}
+    pending_entries: dict[str, PendingEntry] = {}
+    losses_by_symbol: dict[str, int] = {}
     trades: list[BacktestTrade] = []
+    higher_trends = {
+        symbol: _higher_timeframe_trend_pct(candles, trading_day)
+        for symbol, candles in candles_by_symbol.items()
+    }
 
     daily_ticks = []
     for symbol, candles in candles_by_symbol.items():
@@ -124,6 +133,7 @@ def _run_day(
                     close=close,
                     volume=volume,
                     vwap=vwap,
+                    higher_timeframe_trend_pct=higher_trends.get(symbol),
                 )
             )
     daily_ticks.sort(key=lambda tick: tick.timestamp)
@@ -134,19 +144,75 @@ def _run_day(
         ticks_at_time = [tick for tick in daily_ticks if tick.timestamp == timestamp]
         for tick in ticks_at_time:
             if tick.timestamp.time() >= square_off:
-                _close_position(tick, risk, open_entries, entry_reasons, trades, "scheduled square off")
+                _close_position(tick, risk, open_entries, entry_reasons, trades, losses_by_symbol, "scheduled square off")
                 continue
 
             risk_reason = risk.exit_signal_for_risk(tick.symbol, tick.price)
             if risk_reason:
-                _close_position(tick, risk, open_entries, entry_reasons, trades, risk_reason)
+                pending_entries.pop(tick.symbol, None)
+                _close_position(tick, risk, open_entries, entry_reasons, trades, losses_by_symbol, risk_reason)
                 continue
 
             signal = strategies[tick.symbol].on_tick(tick)
-            if signal.side == SignalSide.HOLD:
+            if signal.side in {SignalSide.HOLD, SignalSide.PASS}:
+                pending = pending_entries.get(tick.symbol)
+                if pending and tick.timestamp > pending.tick.timestamp:
+                    decision = evaluate_entry_confirmation(
+                        pending,
+                        tick,
+                        _confirmation_config_for_symbol(config, tick.symbol, losses_by_symbol),
+                    )
+                    if decision.confirmed:
+                        pending_entries.pop(tick.symbol, None)
+                        reason = (
+                            f"{pending.reason} | confirmed by next candle price action: "
+                            f"{signal.reason} | {decision.reason}"
+                        )
+                        if _entry_gate_reason(config, risk, tick.symbol, pending.side) is None:
+                            candidates.append((tick, pending.side, reason))
+                    else:
+                        _keep_or_reject_pending(
+                            config,
+                            pending_entries,
+                            tick,
+                            pending,
+                        )
                 continue
             if signal.side == SignalSide.EXIT:
-                _close_position(tick, risk, open_entries, entry_reasons, trades, signal.reason)
+                pending_entries.pop(tick.symbol, None)
+                _close_position(tick, risk, open_entries, entry_reasons, trades, losses_by_symbol, signal.reason)
+                continue
+            if tick.symbol in risk.positions:
+                pending_entries.pop(tick.symbol, None)
+                continue
+            if _entry_gate_reason(config, risk, tick.symbol, signal.side) is not None:
+                pending_entries.pop(tick.symbol, None)
+                continue
+            if config.execution.confirm_entries:
+                pending = pending_entries.get(tick.symbol)
+                if pending and pending.side == signal.side:
+                    decision = evaluate_entry_confirmation(
+                        pending,
+                        tick,
+                        _confirmation_config_for_symbol(config, tick.symbol, losses_by_symbol),
+                    )
+                    if decision.confirmed:
+                        pending_entries.pop(tick.symbol, None)
+                        reason = (
+                            f"{pending.reason} | confirmed by next candle: "
+                            f"{signal.reason} | {decision.reason}"
+                        )
+                        if _entry_gate_reason(config, risk, tick.symbol, signal.side) is None:
+                            candidates.append((tick, signal.side, reason))
+                    else:
+                        _keep_or_reject_pending(
+                            config,
+                            pending_entries,
+                            tick,
+                            pending,
+                        )
+                    continue
+                pending_entries[tick.symbol] = PendingEntry(signal.side, signal.reason, tick)
                 continue
             candidates.append((tick, signal.side, signal.reason))
 
@@ -169,9 +235,45 @@ def _run_day(
 
     for tick in reversed(daily_ticks):
         if tick.symbol in open_entries:
-            _close_position(tick, risk, open_entries, entry_reasons, trades, "end of data square off")
+            _close_position(tick, risk, open_entries, entry_reasons, trades, losses_by_symbol, "end of data square off")
 
     return trades
+
+
+def _confirmation_config_for_symbol(
+    config: BotConfig,
+    symbol: str,
+    losses_by_symbol: dict[str, int],
+) -> ConfirmationConfig:
+    retry = config.execution.retry_after_loss
+    if not retry.enabled or losses_by_symbol.get(symbol, 0) < retry.losses_before_strict:
+        return config.execution.confirmation
+
+    return replace(
+        config.execution.confirmation,
+        min_follow_through_pct=retry.min_follow_through_pct,
+        min_close_strength_pct=retry.min_close_strength_pct,
+        min_confirmation_volume_ratio=retry.min_confirmation_volume_ratio,
+    )
+
+
+def _keep_or_reject_pending(
+    config: BotConfig,
+    pending_entries: dict[str, PendingEntry],
+    tick: Tick,
+    pending: PendingEntry,
+) -> None:
+    candles_seen = pending.confirmation_candles_seen
+    if tick.timestamp != pending.last_confirmation_timestamp:
+        candles_seen += 1
+    if candles_seen < config.execution.confirmation.max_confirmation_candles:
+        pending_entries[tick.symbol] = replace(
+            pending,
+            confirmation_candles_seen=candles_seen,
+            last_confirmation_timestamp=tick.timestamp,
+        )
+        return
+    pending_entries.pop(tick.symbol, None)
 
 
 def _open_position(
@@ -216,6 +318,7 @@ def _close_position(
     open_entries: dict[str, Position],
     entry_reasons: dict[str, str],
     trades: list[BacktestTrade],
+    losses_by_symbol: dict[str, int],
     reason: str,
 ) -> None:
     position = open_entries.get(tick.symbol)
@@ -226,18 +329,20 @@ def _close_position(
     if not allowed:
         return
 
-    trades.append(
-        BacktestTrade(
-            symbol=tick.symbol,
-            side=position.side,
-            entry_time=position.entry_time,
-            entry_price=position.entry_price,
-            exit_time=tick.timestamp,
-            exit_price=tick.price,
-            quantity=position.quantity,
-            reason=f"{entry_reasons.get(tick.symbol, '')} | exit: {reason}",
-        )
+    trade = BacktestTrade(
+        symbol=tick.symbol,
+        side=position.side,
+        entry_time=position.entry_time,
+        entry_price=position.entry_price,
+        exit_time=tick.timestamp,
+        exit_price=tick.price,
+        quantity=position.quantity,
+        reason=f"{entry_reasons.get(tick.symbol, '')} | exit: {reason}",
     )
+    trades.append(trade)
+    if trade.pnl < 0:
+        losses_by_symbol[tick.symbol] = losses_by_symbol.get(tick.symbol, 0) + 1
+    risk.record_realized_pnl(trade.pnl)
     risk.record_exit(tick.symbol)
     del open_entries[tick.symbol]
     entry_reasons.pop(tick.symbol, None)
@@ -253,3 +358,44 @@ def _candle_time(candle: dict[str, Any]) -> datetime:
 def _parse_time(value: str) -> time:
     hour, minute = value.split(":", 1)
     return time(int(hour), int(minute))
+
+
+def _entry_gate_reason(config: BotConfig, risk: RiskManager, symbol: str, side: SignalSide) -> str | None:
+    if side not in {SignalSide.BUY, SignalSide.SELL}:
+        return None
+
+    daily_guard_reason = risk.daily_guard_reason()
+    if daily_guard_reason:
+        return daily_guard_reason
+
+    symbol_quality = config.execution.symbol_quality
+    if not symbol_quality.enabled:
+        return None
+    if symbol in set(symbol_quality.blocked_symbols):
+        return f"symbol quality gate blocked {symbol}"
+    allowed_symbols = set(symbol_quality.allowed_symbols)
+    if allowed_symbols and symbol not in allowed_symbols:
+        return f"symbol quality gate allows only {', '.join(sorted(allowed_symbols))}"
+    return None
+
+
+def _higher_timeframe_trend_pct(candles: list[dict[str, Any]], trading_day: date) -> float | None:
+    daily_closes: dict[date, float] = {}
+    first_allowed_day = trading_day - timedelta(days=14)
+    for candle in candles:
+        candle_day = _candle_time(candle).date()
+        if candle_day >= trading_day or candle_day < first_allowed_day:
+            continue
+        daily_closes[candle_day] = float(candle["close"])
+
+    days = sorted(daily_closes)
+    if len(days) < 2:
+        return None
+
+    first_day = days[0]
+    last_day = days[-1]
+    first = daily_closes[first_day]
+    last = daily_closes[last_day]
+    if first <= 0:
+        return None
+    return ((last - first) / first) * 100

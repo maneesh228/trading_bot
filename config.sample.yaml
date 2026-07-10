@@ -14,10 +14,31 @@ risk:
   per_trade_stop_loss_pct: 0.6
   per_trade_target_pct: 1.0
   trailing_stop_loss_pct: 0.4
+  max_daily_loss_amount:
+  max_daily_losses:
 
 execution:
   trade_selection: per_symbol
   position_sizing: max_position_value
+  confirm_entries: true
+  confirmation:
+    require_close_beyond_breakout: true
+    min_follow_through_pct: 0.10
+    min_close_strength_pct: 70
+    require_vwap_side: true
+    min_confirmation_volume_ratio: 0.6
+    max_confirmation_candles: 2
+    strong_trend_pct: 0.40
+  retry_after_loss:
+    enabled: false
+    losses_before_strict: 1
+    min_follow_through_pct: 0.20
+    min_close_strength_pct: 80
+    min_confirmation_volume_ratio: 0.8
+  symbol_quality:
+    enabled: false
+    blocked_symbols: []
+    allowed_symbols: []
 
 watchlist:
   - symbol: ASHOKLEY
@@ -37,6 +58,9 @@ watchlist:
         - name: trend_regime
           lookback: 6
           min_trend_pct: 0.15
+        - name: higher_timeframe_trend_filter
+          min_trend_pct: 2.0
+          allow_sideways: true
         - name: time_after
           after: "09:45"
         - name: time_before

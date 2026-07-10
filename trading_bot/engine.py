@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime
 
 from trading_bot.broker import Broker
+from trading_bot.confirmation import PendingEntry, evaluate_entry_confirmation
 from trading_bot.config import BotConfig
 from trading_bot.execution import quantity_for_capital, signal_strength
 from trading_bot.journal import TradeJournal
@@ -25,12 +27,15 @@ class TradingEngine:
             for item in config.watchlist
         }
         self.quantities = {item.symbol: item.quantity for item in config.watchlist}
+        self.pending_entries: dict[str, PendingEntry] = {}
         self.risk = RiskManager(
             max_trades_per_day=config.risk.max_trades_per_day,
             max_position_value=config.risk.max_position_value,
             stop_loss_pct=config.risk.per_trade_stop_loss_pct,
             target_pct=config.risk.per_trade_target_pct,
             trailing_stop_loss_pct=config.risk.trailing_stop_loss_pct,
+            max_daily_loss_amount=config.risk.max_daily_loss_amount,
+            max_daily_losses=config.risk.max_daily_losses,
         )
 
     def run_forever(self) -> None:
@@ -57,6 +62,7 @@ class TradingEngine:
         for symbol, tick in ticks.items():
             risk_reason = self.risk.exit_signal_for_risk(symbol, tick.price)
             if risk_reason:
+                self.pending_entries.pop(symbol, None)
                 self._exit_position(symbol, tick.price, risk_reason, tick)
                 continue
 
@@ -70,12 +76,30 @@ class TradingEngine:
                     "open_position": self.risk.positions.get(symbol),
                 },
             )
-            if signal.side == SignalSide.HOLD:
+            if signal.side in {SignalSide.HOLD, SignalSide.PASS}:
+                if self.config.execution.confirm_entries and symbol not in self.risk.positions:
+                    confirmed_signal = self._confirm_pending_entry_from_price_action(symbol, tick, signal.reason)
+                    if confirmed_signal is not None:
+                        candidates.append((symbol, tick, confirmed_signal))
+                    if symbol in self.pending_entries:
+                        continue
+                    if confirmed_signal is not None:
+                        continue
+                self._cancel_pending_entry(symbol, tick, signal.reason)
                 logger.debug("%s hold: %s", symbol, signal.reason)
                 continue
             if signal.side == SignalSide.EXIT:
+                self.pending_entries.pop(symbol, None)
                 self._exit_position(symbol, tick.price, signal.reason, tick)
                 continue
+            if symbol in self.risk.positions:
+                self.pending_entries.pop(symbol, None)
+                continue
+            if self.config.execution.confirm_entries:
+                confirmed_signal = self._confirm_entry_signal(symbol, tick, signal)
+                if confirmed_signal is None:
+                    continue
+                signal = confirmed_signal
 
             candidates.append((symbol, tick, signal))
 
@@ -121,6 +145,7 @@ class TradingEngine:
             return
         order = self.broker.place_order(request)
         pnl = position.pnl_pct(price)
+        pnl_amount = self._position_pnl(position, price)
         self._journal(
             "position_closed",
             {
@@ -129,9 +154,11 @@ class TradingEngine:
                 "exit_price": price,
                 "exit_reason": reason,
                 "pnl_pct": pnl,
+                "pnl": pnl_amount,
                 "tick": tick,
             },
         )
+        self.risk.record_realized_pnl(pnl_amount)
         self.risk.record_exit(symbol)
 
     def _place_best_candidate(self, candidates: list[tuple[str, Tick, Signal]]) -> None:
@@ -166,6 +193,20 @@ class TradingEngine:
         self._place_entry(symbol, tick, selected_signal)
 
     def _place_entry(self, symbol: str, tick: Tick, signal: Signal) -> None:
+        gate_reason = self._entry_gate_reason(symbol, signal.side)
+        if gate_reason:
+            request = self._entry_request(symbol, tick, signal)
+            logger.info("Skipped %s %s: %s", signal.side, symbol, gate_reason)
+            self._journal(
+                "order_skipped",
+                {
+                    "request": request,
+                    "reason": gate_reason,
+                    "tick": tick,
+                },
+            )
+            return
+
         request = self._entry_request(symbol, tick, signal)
         allowed, reason = self.risk.can_place(request)
         if not allowed:
@@ -198,6 +239,133 @@ class TradingEngine:
             )
         )
 
+    def _confirm_entry_signal(self, symbol: str, tick: Tick, signal: Signal) -> Signal | None:
+        gate_reason = self._entry_gate_reason(symbol, signal.side)
+        if gate_reason:
+            self.pending_entries.pop(symbol, None)
+            self._journal(
+                "entry_signal_blocked",
+                {
+                    "symbol": symbol,
+                    "tick": tick,
+                    "signal": signal,
+                    "reason": gate_reason,
+                },
+            )
+            return None
+
+        pending = self.pending_entries.get(symbol)
+        if pending and pending.side == signal.side:
+            return self._evaluate_pending_entry(symbol, tick, signal.side, f"next candle signal: {signal.reason}")
+
+        self.pending_entries[symbol] = PendingEntry(signal.side, signal.reason, tick)
+        self._journal(
+            "entry_signal_pending",
+            {
+                "symbol": symbol,
+                "tick": tick,
+                "signal": signal,
+                "reason": "waiting for next candle confirmation",
+            },
+        )
+        return None
+
+    def _confirm_pending_entry_from_price_action(self, symbol: str, tick: Tick, reason: str) -> Signal | None:
+        pending = self.pending_entries.get(symbol)
+        if pending is None:
+            return None
+        if tick.timestamp <= pending.tick.timestamp:
+            return None
+        if tick.timestamp == pending.last_confirmation_timestamp:
+            return None
+        return self._evaluate_pending_entry(symbol, tick, pending.side, f"next candle price action: {reason}")
+
+    def _evaluate_pending_entry(self, symbol: str, tick: Tick, side: SignalSide, reason: str) -> Signal | None:
+        pending = self.pending_entries.get(symbol)
+        if pending is None:
+            return None
+        if tick.timestamp <= pending.tick.timestamp:
+            return None
+        if tick.timestamp == pending.last_confirmation_timestamp:
+            return None
+
+        decision = evaluate_entry_confirmation(
+            pending,
+            tick,
+            self.config.execution.confirmation,
+        )
+        if decision.confirmed:
+            self.pending_entries.pop(symbol, None)
+            confirmed = Signal(
+                side,
+                f"{pending.reason} | confirmed by {reason} | {decision.reason}",
+            )
+            self._journal(
+                "entry_signal_confirmed",
+                {
+                    "symbol": symbol,
+                    "signal_tick": pending.tick,
+                    "confirmation_tick": tick,
+                    "signal": confirmed,
+                },
+            )
+            return confirmed
+
+        candles_seen = pending.confirmation_candles_seen
+        if tick.timestamp != pending.last_confirmation_timestamp:
+            candles_seen += 1
+        if candles_seen < self.config.execution.confirmation.max_confirmation_candles:
+            self.pending_entries[symbol] = replace(
+                pending,
+                confirmation_candles_seen=candles_seen,
+                last_confirmation_timestamp=tick.timestamp,
+            )
+            self._journal(
+                "entry_signal_still_pending",
+                {
+                    "symbol": symbol,
+                    "signal_tick": pending.tick,
+                    "confirmation_tick": tick,
+                    "pending_side": pending.side,
+                    "pending_reason": pending.reason,
+                    "attempt": candles_seen,
+                    "max_attempts": self.config.execution.confirmation.max_confirmation_candles,
+                    "reason": decision.reason,
+                },
+            )
+            return None
+
+        self.pending_entries.pop(symbol, None)
+        self._journal(
+            "entry_signal_rejected",
+            {
+                "symbol": symbol,
+                "signal_tick": pending.tick,
+                "confirmation_tick": tick,
+                "tick": tick,
+                "pending_side": pending.side,
+                "pending_reason": pending.reason,
+                "reason": decision.reason,
+            },
+        )
+        return None
+
+    def _cancel_pending_entry(self, symbol: str, tick: Tick, reason: str) -> None:
+        pending = self.pending_entries.pop(symbol, None)
+        if not pending:
+            return
+        self._journal(
+            "entry_signal_cancelled",
+            {
+                "symbol": symbol,
+                "tick": tick,
+                "pending_side": pending.side,
+                "pending_reason": pending.reason,
+                "signal_tick": pending.tick,
+                "reason": reason,
+            },
+        )
+
     def _entry_request(self, symbol: str, tick: Tick, signal: Signal) -> OrderRequest:
         quantity = self.quantities[symbol]
         if self.config.execution.position_sizing == "max_position_value":
@@ -209,6 +377,32 @@ class TradingEngine:
             price=tick.price,
             reason=signal.reason,
         )
+
+    def _entry_gate_reason(self, symbol: str, side: SignalSide) -> str | None:
+        if side not in {SignalSide.BUY, SignalSide.SELL}:
+            return None
+
+        daily_guard_reason = self.risk.daily_guard_reason()
+        if daily_guard_reason:
+            return daily_guard_reason
+
+        symbol_quality = self.config.execution.symbol_quality
+        if not symbol_quality.enabled:
+            return None
+        if symbol in set(symbol_quality.blocked_symbols):
+            return f"symbol quality gate blocked {symbol}"
+        allowed_symbols = set(symbol_quality.allowed_symbols)
+        if allowed_symbols and symbol not in allowed_symbols:
+            return f"symbol quality gate allows only {', '.join(sorted(allowed_symbols))}"
+        return None
+
+    @staticmethod
+    def _position_pnl(position: Position, price: float) -> float:
+        if position.side == SignalSide.BUY:
+            return (price - position.entry_price) * position.quantity
+        if position.side == SignalSide.SELL:
+            return (position.entry_price - price) * position.quantity
+        return 0.0
 
     def _should_square_off(self) -> bool:
         now = datetime.now().strftime("%H:%M")

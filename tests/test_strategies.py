@@ -5,6 +5,7 @@ from trading_bot.strategies import (
     CandleBodyFilterStrategy,
     CompositeStrategy,
     EmaCrossoverStrategy,
+    HigherTimeframeTrendFilterStrategy,
     MacdStrategy,
     MinVolumeStrategy,
     OpenHighLowStrategy,
@@ -83,10 +84,10 @@ def test_time_volume_body_and_vwap_filters():
     now = datetime(2026, 6, 22, 9, 46)
     tick = Tick("CANBK", 101, now, open=100, high=102, low=99, close=101, volume=100000, vwap=100)
 
-    assert TimeAfterStrategy("09:45").on_tick(tick).side == SignalSide.BUY
-    assert TimeBeforeStrategy("14:30").on_tick(tick).side == SignalSide.BUY
-    assert MinVolumeStrategy(50000).on_tick(tick).side == SignalSide.BUY
-    assert CandleBodyFilterStrategy(min_body_pct=10).on_tick(tick).side == SignalSide.BUY
+    assert TimeAfterStrategy("09:45").on_tick(tick).side == SignalSide.PASS
+    assert TimeBeforeStrategy("14:30").on_tick(tick).side == SignalSide.PASS
+    assert MinVolumeStrategy(50000).on_tick(tick).side == SignalSide.PASS
+    assert CandleBodyFilterStrategy(min_body_pct=10).on_tick(tick).side == SignalSide.PASS
     assert VwapFilterStrategy(min_distance_pct=0.02).on_tick(tick).side == SignalSide.BUY
 
 
@@ -114,6 +115,33 @@ def test_trend_regime_classifies_uptrend_downtrend_and_sideways():
     for price in [100, 100.2, 100.4]:
         signal = sideways.on_tick(Tick("INFY", price, now))
     assert signal.side == SignalSide.HOLD
+
+
+def test_higher_timeframe_trend_filter_blocks_counter_trend_side():
+    strategy = HigherTimeframeTrendFilterStrategy(min_trend_pct=2.0)
+    now = datetime.now()
+
+    assert strategy.on_tick(Tick("INFY", 100, now, higher_timeframe_trend_pct=-12.0)).side == SignalSide.SELL
+    assert strategy.on_tick(Tick("INFY", 100, now, higher_timeframe_trend_pct=3.0)).side == SignalSide.BUY
+    assert strategy.on_tick(Tick("INFY", 100, now, higher_timeframe_trend_pct=1.0)).side == SignalSide.PASS
+
+
+def test_composite_blocks_buy_against_higher_timeframe_downtrend():
+    now = datetime(2026, 6, 30, 11, 20)
+    strategy = CompositeStrategy(
+        mode="all",
+        strategies=[
+            VwapFilterStrategy(min_distance_pct=0.1),
+            HigherTimeframeTrendFilterStrategy(min_trend_pct=2.0),
+        ],
+    )
+
+    signal = strategy.on_tick(
+        Tick("INFY", 1016.7, now, vwap=1013.8, higher_timeframe_trend_pct=-12.0)
+    )
+
+    assert signal.side == SignalSide.HOLD
+    assert "higher timeframe downtrend" in signal.reason
 
 
 def test_candle_body_filter_rejects_flat_candle():
@@ -153,7 +181,7 @@ def test_volume_spike_filter():
     for volume in [100, 110, 90]:
         assert strategy.on_tick(Tick("INFY", 100, now, volume=volume)).side == SignalSide.HOLD
 
-    assert strategy.on_tick(Tick("INFY", 100, now, volume=250)).side == SignalSide.BUY
+    assert strategy.on_tick(Tick("INFY", 100, now, volume=250)).side == SignalSide.PASS
 
 
 def test_support_resistance_breakout_buy_signal():
@@ -164,3 +192,43 @@ def test_support_resistance_breakout_buy_signal():
         assert strategy.on_tick(Tick("INFY", price, now)).side == SignalSide.HOLD
 
     assert strategy.on_tick(Tick("INFY", 103, now)).side == SignalSide.BUY
+
+
+def test_composite_all_allows_pass_filters_for_sell_signal():
+    now = datetime(2026, 6, 24, 10, 0)
+    strategy = CompositeStrategy(
+        mode="all",
+        strategies=[
+            SupportResistanceBreakoutStrategy(lookback=3, buffer_pct=0.0),
+            TrendRegimeStrategy(lookback=3, min_trend_pct=1),
+            TimeAfterStrategy("09:15"),
+            TimeBeforeStrategy("14:30"),
+            VolumeSpikeStrategy(lookback=3, multiplier=1.1, min_volume=1),
+            CandleBodyFilterStrategy(min_body_pct=10),
+            VwapFilterStrategy(min_distance_pct=0.02),
+        ],
+    )
+
+    warming_ticks = [
+        Tick("WIPRO", 100, now, open=100, high=101, low=99, close=100, volume=100, vwap=100),
+        Tick("WIPRO", 99, now + timedelta(minutes=5), open=100, high=100, low=99, close=99, volume=100, vwap=100),
+        Tick("WIPRO", 98, now + timedelta(minutes=10), open=99, high=99, low=98, close=98, volume=100, vwap=100),
+    ]
+    for tick in warming_ticks:
+        assert strategy.on_tick(tick).side == SignalSide.HOLD
+
+    signal = strategy.on_tick(
+        Tick(
+            "WIPRO",
+            96.8,
+            now + timedelta(minutes=15),
+            open=98,
+            high=98,
+            low=96.8,
+            close=96.8,
+            volume=150,
+            vwap=100,
+        )
+    )
+
+    assert signal.side == SignalSide.SELL

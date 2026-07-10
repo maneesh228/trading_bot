@@ -221,7 +221,7 @@ class TimeAfterStrategy:
 
     def on_tick(self, tick: Tick) -> Signal:
         if tick.timestamp.time() >= self._after_time:
-            return Signal(SignalSide.BUY, f"time is after {self.after}")
+            return Signal(SignalSide.PASS, f"time is after {self.after}")
         return Signal(SignalSide.HOLD, f"waiting until {self.after}")
 
 
@@ -234,7 +234,7 @@ class TimeBeforeStrategy:
 
     def on_tick(self, tick: Tick) -> Signal:
         if tick.timestamp.time() < self._before_time:
-            return Signal(SignalSide.BUY, f"time is before {self.before}")
+            return Signal(SignalSide.PASS, f"time is before {self.before}")
         return Signal(SignalSide.HOLD, f"entries closed after {self.before}")
 
 
@@ -270,6 +270,28 @@ class TrendRegimeStrategy:
 
 
 @dataclass
+class HigherTimeframeTrendFilterStrategy:
+    min_trend_pct: float = 2.0
+    allow_sideways: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_trend_pct < 0:
+            raise ValueError("min_trend_pct must be non-negative")
+
+    def on_tick(self, tick: Tick) -> Signal:
+        if tick.higher_timeframe_trend_pct is None:
+            return Signal(SignalSide.PASS, "higher timeframe trend unavailable")
+        trend_pct = tick.higher_timeframe_trend_pct
+        if trend_pct >= self.min_trend_pct:
+            return Signal(SignalSide.BUY, f"higher timeframe uptrend {trend_pct:.2f}%")
+        if trend_pct <= -self.min_trend_pct:
+            return Signal(SignalSide.SELL, f"higher timeframe downtrend {trend_pct:.2f}%")
+        if self.allow_sideways:
+            return Signal(SignalSide.PASS, f"higher timeframe sideways {trend_pct:.2f}%")
+        return Signal(SignalSide.HOLD, f"higher timeframe sideways {trend_pct:.2f}%")
+
+
+@dataclass
 class MinVolumeStrategy:
     min_volume: float
 
@@ -277,7 +299,7 @@ class MinVolumeStrategy:
         if tick.volume is None:
             return Signal(SignalSide.HOLD, "volume unavailable")
         if tick.volume >= self.min_volume:
-            return Signal(SignalSide.BUY, f"volume {tick.volume:.0f} >= {self.min_volume:.0f}")
+            return Signal(SignalSide.PASS, f"volume {tick.volume:.0f} >= {self.min_volume:.0f}")
         return Signal(SignalSide.HOLD, f"volume {tick.volume:.0f} below {self.min_volume:.0f}")
 
 
@@ -307,7 +329,7 @@ class VolumeSpikeStrategy:
         self.volumes.append(current_volume)
         required_volume = max(self.min_volume, average_volume * self.multiplier)
         if current_volume >= required_volume:
-            return Signal(SignalSide.BUY, f"volume spike {current_volume:.0f} >= {required_volume:.0f}")
+            return Signal(SignalSide.PASS, f"volume spike {current_volume:.0f} >= {required_volume:.0f}")
         return Signal(SignalSide.HOLD, f"volume {current_volume:.0f} below spike threshold {required_volume:.0f}")
 
 
@@ -324,10 +346,10 @@ class CandleBodyFilterStrategy:
         if candle_range <= 0:
             if self.reject_flat:
                 return Signal(SignalSide.HOLD, "flat candle rejected")
-            return Signal(SignalSide.BUY, "flat candle allowed")
+            return Signal(SignalSide.PASS, "flat candle allowed")
         body_pct = (abs(close - tick.open) / candle_range) * 100
         if body_pct >= self.min_body_pct:
-            return Signal(SignalSide.BUY, f"body {body_pct:.2f}% >= {self.min_body_pct:.2f}%")
+            return Signal(SignalSide.PASS, f"body {body_pct:.2f}% >= {self.min_body_pct:.2f}%")
         return Signal(SignalSide.HOLD, f"body {body_pct:.2f}% below {self.min_body_pct:.2f}%")
 
 
@@ -452,18 +474,25 @@ class CompositeStrategy:
         return self._all_signal(signals)
 
     def _all_signal(self, signals: list[Signal]) -> Signal:
+        hold_signals = [signal for signal in signals if signal.side == SignalSide.HOLD]
+        if hold_signals:
+            return Signal(SignalSide.HOLD, self._reason("composite hold", signals))
+
         buy_signals = [signal for signal in signals if signal.side == SignalSide.BUY]
         sell_signals = [signal for signal in signals if signal.side == SignalSide.SELL]
-        if len(buy_signals) == len(signals):
+        if buy_signals and not sell_signals:
             return Signal(SignalSide.BUY, self._reason("all buy", buy_signals))
-        if len(sell_signals) == len(signals):
+        if sell_signals and not buy_signals:
             return Signal(SignalSide.SELL, self._reason("all sell", sell_signals))
         return Signal(SignalSide.HOLD, self._reason("composite hold", signals))
 
     def _majority_signal(self, signals: list[Signal]) -> Signal:
         buy_signals = [signal for signal in signals if signal.side == SignalSide.BUY]
         sell_signals = [signal for signal in signals if signal.side == SignalSide.SELL]
-        threshold = (len(signals) // 2) + 1
+        directional_count = len(buy_signals) + len(sell_signals)
+        if directional_count == 0:
+            return Signal(SignalSide.HOLD, self._reason("composite hold", signals))
+        threshold = (directional_count // 2) + 1
         if len(buy_signals) >= threshold and len(buy_signals) > len(sell_signals):
             return Signal(SignalSide.BUY, self._reason("majority buy", buy_signals))
         if len(sell_signals) >= threshold and len(sell_signals) > len(buy_signals):
@@ -511,6 +540,11 @@ def build_strategy(name: str, params: dict) -> Strategy:
         return TrendRegimeStrategy(
             lookback=int(params.get("lookback", 6)),
             min_trend_pct=float(params.get("min_trend_pct", 0.15)),
+        )
+    if name == "higher_timeframe_trend_filter":
+        return HigherTimeframeTrendFilterStrategy(
+            min_trend_pct=float(params.get("min_trend_pct", 2.0)),
+            allow_sideways=bool(params.get("allow_sideways", True)),
         )
     if name == "min_volume":
         return MinVolumeStrategy(min_volume=float(params.get("min_volume", 0)))

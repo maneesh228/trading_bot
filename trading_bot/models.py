@@ -8,6 +8,7 @@ from enum import Enum
 class SignalSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
+    PASS = "PASS"
     EXIT = "EXIT"
     HOLD = "HOLD"
 
@@ -23,6 +24,7 @@ class Tick:
     close: float | None = None
     volume: float | None = None
     vwap: float | None = None
+    higher_timeframe_trend_pct: float | None = None
 
 
 @dataclass(frozen=True)

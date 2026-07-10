@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,8 @@ class RiskConfig:
     per_trade_stop_loss_pct: float
     per_trade_target_pct: float
     trailing_stop_loss_pct: float | None = None
+    max_daily_loss_amount: float | None = None
+    max_daily_losses: int | None = None
 
 
 @dataclass(frozen=True)
@@ -44,9 +46,40 @@ class WatchSymbol:
 
 
 @dataclass(frozen=True)
+class ConfirmationConfig:
+    require_close_beyond_breakout: bool = True
+    min_follow_through_pct: float = 0.10
+    min_close_strength_pct: float = 70.0
+    require_vwap_side: bool = True
+    min_confirmation_volume_ratio: float = 0.6
+    max_confirmation_candles: int = 2
+    strong_trend_pct: float = 0.40
+
+
+@dataclass(frozen=True)
+class RetryAfterLossConfig:
+    enabled: bool = False
+    losses_before_strict: int = 1
+    min_follow_through_pct: float = 0.20
+    min_close_strength_pct: float = 80.0
+    min_confirmation_volume_ratio: float = 0.8
+
+
+@dataclass(frozen=True)
+class SymbolQualityConfig:
+    enabled: bool = False
+    blocked_symbols: list[str] = field(default_factory=list)
+    allowed_symbols: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     trade_selection: str = "per_symbol"
     position_sizing: str = "configured_quantity"
+    confirm_entries: bool = False
+    confirmation: ConfirmationConfig = field(default_factory=ConfirmationConfig)
+    retry_after_loss: RetryAfterLossConfig = field(default_factory=RetryAfterLossConfig)
+    symbol_quality: SymbolQualityConfig = field(default_factory=SymbolQualityConfig)
 
 
 @dataclass(frozen=True)
@@ -80,10 +113,32 @@ def load_config(path: str | Path) -> BotConfig:
     if not watchlist:
         raise ValueError("watchlist must contain at least one symbol")
 
+    execution_raw = dict(raw.get("execution", {}))
+    confirmation_raw = execution_raw.pop("confirmation", {})
+    retry_after_loss_raw = execution_raw.pop("retry_after_loss", {})
+    symbol_quality_raw = execution_raw.pop("symbol_quality", {})
+
     return BotConfig(
         broker=BrokerConfig(**raw["broker"]),
         market=MarketConfig(**raw["market"]),
         risk=RiskConfig(**raw["risk"]),
-        execution=ExecutionConfig(**raw.get("execution", {})),
+        execution=ExecutionConfig(
+            **execution_raw,
+            confirmation=ConfirmationConfig(**confirmation_raw),
+            retry_after_loss=RetryAfterLossConfig(**retry_after_loss_raw),
+            symbol_quality=SymbolQualityConfig(
+                **{
+                    **symbol_quality_raw,
+                    "blocked_symbols": [
+                        str(symbol).upper()
+                        for symbol in symbol_quality_raw.get("blocked_symbols", [])
+                    ],
+                    "allowed_symbols": [
+                        str(symbol).upper()
+                        for symbol in symbol_quality_raw.get("allowed_symbols", [])
+                    ],
+                }
+            ),
+        ),
         watchlist=watchlist,
     )
