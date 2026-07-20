@@ -28,6 +28,16 @@ class Tick:
 
 
 @dataclass(frozen=True)
+class MarketRegimeSnapshot:
+    symbol: str
+    timestamp: datetime
+    close: float
+    average_price: float | None
+    day_move_pct: float
+    trend_6_pct: float | None
+
+
+@dataclass(frozen=True)
 class Signal:
     side: SignalSide
     reason: str = ""

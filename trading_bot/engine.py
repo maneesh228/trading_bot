@@ -193,7 +193,7 @@ class TradingEngine:
         self._place_entry(symbol, tick, selected_signal)
 
     def _place_entry(self, symbol: str, tick: Tick, signal: Signal) -> None:
-        gate_reason = self._entry_gate_reason(symbol, signal.side)
+        gate_reason = self._entry_gate_reason(symbol, signal.side, tick=tick, signal_reason=signal.reason)
         if gate_reason:
             request = self._entry_request(symbol, tick, signal)
             logger.info("Skipped %s %s: %s", signal.side, symbol, gate_reason)
@@ -240,7 +240,7 @@ class TradingEngine:
         )
 
     def _confirm_entry_signal(self, symbol: str, tick: Tick, signal: Signal) -> Signal | None:
-        gate_reason = self._entry_gate_reason(symbol, signal.side)
+        gate_reason = self._entry_gate_reason(symbol, signal.side, include_market_regime=False)
         if gate_reason:
             self.pending_entries.pop(symbol, None)
             self._journal(
@@ -378,7 +378,15 @@ class TradingEngine:
             reason=signal.reason,
         )
 
-    def _entry_gate_reason(self, symbol: str, side: SignalSide) -> str | None:
+    def _entry_gate_reason(
+        self,
+        symbol: str,
+        side: SignalSide,
+        *,
+        tick: Tick | None = None,
+        signal_reason: str = "",
+        include_market_regime: bool = True,
+    ) -> str | None:
         if side not in {SignalSide.BUY, SignalSide.SELL}:
             return None
 
@@ -387,13 +395,114 @@ class TradingEngine:
             return daily_guard_reason
 
         symbol_quality = self.config.execution.symbol_quality
-        if not symbol_quality.enabled:
+        if symbol_quality.enabled:
+            if symbol in set(symbol_quality.blocked_symbols):
+                return f"symbol quality gate blocked {symbol}"
+            allowed_symbols = set(symbol_quality.allowed_symbols)
+            if allowed_symbols and symbol not in allowed_symbols:
+                return f"symbol quality gate allows only {', '.join(sorted(allowed_symbols))}"
+
+        if not include_market_regime:
             return None
-        if symbol in set(symbol_quality.blocked_symbols):
-            return f"symbol quality gate blocked {symbol}"
-        allowed_symbols = set(symbol_quality.allowed_symbols)
-        if allowed_symbols and symbol not in allowed_symbols:
-            return f"symbol quality gate allows only {', '.join(sorted(allowed_symbols))}"
+
+        market_regime_reason = self._market_regime_gate_reason(side, tick=tick, signal_reason=signal_reason)
+        if market_regime_reason:
+            return market_regime_reason
+        return None
+
+    def _market_regime_gate_reason(
+        self,
+        side: SignalSide,
+        *,
+        tick: Tick | None,
+        signal_reason: str,
+    ) -> str | None:
+        market_regime = self.config.execution.market_regime
+        if not market_regime.enabled:
+            return None
+
+        snapshot = self.broker.market_regime(market_regime.index_symbol)
+        if snapshot is None:
+            reason = f"market regime blocked: {market_regime.index_symbol} context unavailable"
+            return None if self._strong_stock_exception(side, tick, signal_reason, reason) else reason
+
+        if market_regime.require_average_side:
+            if snapshot.average_price is None:
+                reason = f"market regime blocked: {snapshot.symbol} average unavailable"
+                return None if self._strong_stock_exception(side, tick, signal_reason, reason) else reason
+            if side == SignalSide.BUY and snapshot.close < snapshot.average_price:
+                reason = (
+                    f"market regime blocked: BUY needs {snapshot.symbol} above average "
+                    f"(close={snapshot.close:.2f}, avg={snapshot.average_price:.2f})"
+                )
+                return None if self._strong_stock_exception(side, tick, signal_reason, reason) else reason
+            if side == SignalSide.SELL and snapshot.close > snapshot.average_price:
+                reason = (
+                    f"market regime blocked: SELL needs {snapshot.symbol} below average "
+                    f"(close={snapshot.close:.2f}, avg={snapshot.average_price:.2f})"
+                )
+                return None if self._strong_stock_exception(side, tick, signal_reason, reason) else reason
+
+        if market_regime.min_trend_6_pct > 0:
+            if snapshot.trend_6_pct is None:
+                reason = f"market regime blocked: {snapshot.symbol} 6-candle trend unavailable"
+                return None if self._strong_stock_exception(side, tick, signal_reason, reason) else reason
+            signed_trend = snapshot.trend_6_pct if side == SignalSide.BUY else -snapshot.trend_6_pct
+            if signed_trend < market_regime.min_trend_6_pct:
+                reason = (
+                    f"market regime blocked: {side.value} needs {snapshot.symbol} "
+                    f"6-candle trend >= {market_regime.min_trend_6_pct:.2f}% "
+                    f"(actual={signed_trend:.2f}%, raw={snapshot.trend_6_pct:.2f}%, "
+                    f"day={snapshot.day_move_pct:.2f}%)"
+                )
+                return None if self._strong_stock_exception(side, tick, signal_reason, reason) else reason
+
+        return None
+
+    def _strong_stock_exception(self, side: SignalSide, tick: Tick | None, signal_reason: str, block_reason: str) -> bool:
+        market_regime = self.config.execution.market_regime
+        if not market_regime.allow_strong_stock_exception or tick is None:
+            return False
+        if side.value != market_regime.exception_side.upper():
+            return False
+
+        vwap_distance = self._directional_vwap_distance_pct(side, tick)
+        if vwap_distance is None or vwap_distance < market_regime.exception_min_stock_vwap_distance_pct:
+            return False
+
+        signal_strength_pct = self._directional_signal_strength_pct(side, tick)
+        if signal_strength_pct is None or signal_strength_pct < market_regime.exception_min_signal_strength_pct:
+            return False
+
+        logger.info(
+            "Market regime exception allowed %s: %s; stock_vwap_distance=%.2f%% strength=%.2f%% reason=%s",
+            tick.symbol,
+            block_reason,
+            vwap_distance,
+            signal_strength_pct,
+            signal_reason,
+        )
+        return True
+
+    @staticmethod
+    def _directional_vwap_distance_pct(side: SignalSide, tick: Tick) -> float | None:
+        if tick.vwap is None or tick.vwap <= 0:
+            return None
+        raw = ((tick.price - tick.vwap) / tick.vwap) * 100
+        if side == SignalSide.BUY:
+            return raw
+        if side == SignalSide.SELL:
+            return -raw
+        return None
+
+    @staticmethod
+    def _directional_signal_strength_pct(side: SignalSide, tick: Tick) -> float | None:
+        if tick.open is None or tick.open <= 0:
+            return None
+        if side == SignalSide.BUY:
+            return ((tick.price - tick.open) / tick.open) * 100
+        if side == SignalSide.SELL:
+            return ((tick.open - tick.price) / tick.open) * 100
         return None
 
     @staticmethod

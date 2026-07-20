@@ -6,7 +6,7 @@ from datetime import date
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from trading_bot.models import OrderRequest, OrderResult, SignalSide, Tick
+from trading_bot.models import MarketRegimeSnapshot, OrderRequest, OrderResult, SignalSide, Tick
 from trading_bot.token_store import load_local_credentials, load_runtime_credentials, make_kite_client
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 class Broker:
     def ltp(self, symbols: list[str]) -> dict[str, Tick]:
         raise NotImplementedError
+
+    def market_regime(self, index_symbol: str) -> MarketRegimeSnapshot | None:
+        return None
 
     def place_order(self, request: OrderRequest) -> OrderResult:
         raise NotImplementedError
@@ -30,6 +33,7 @@ class ZerodhaBroker(Broker):
         self.kite = make_kite_client(load_runtime_credentials())
         self._instrument_tokens: dict[str, int] | None = None
         self._ohlc_cache: dict[str, tuple[datetime, Tick]] = {}
+        self._market_regime_cache: dict[tuple[str, datetime], MarketRegimeSnapshot | None] = {}
         self._higher_trend_cache: dict[tuple[str, date], float | None] = {}
 
     def ltp(self, symbols: list[str]) -> dict[str, Tick]:
@@ -122,6 +126,38 @@ class ZerodhaBroker(Broker):
             }
         return self._instrument_tokens.get(symbol)
 
+    def market_regime(self, index_symbol: str) -> MarketRegimeSnapshot | None:
+        now = datetime.now()
+        current_bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+        completed_bucket = current_bucket - timedelta(minutes=5)
+        cache_key = (index_symbol, completed_bucket)
+        if cache_key in self._market_regime_cache:
+            return self._market_regime_cache[cache_key]
+
+        token = self._instrument_token(index_symbol)
+        if token is None:
+            logger.warning("Could not find market regime instrument token for %s", index_symbol)
+            self._market_regime_cache[cache_key] = None
+            return None
+
+        try:
+            candles = self.kite.historical_data(
+                instrument_token=token,
+                from_date=now.replace(hour=9, minute=15, second=0, microsecond=0),
+                to_date=completed_bucket,
+                interval="5minute",
+                continuous=False,
+                oi=False,
+            )
+        except Exception as exc:
+            logger.warning("Could not fetch market regime candles for %s: %s", index_symbol, exc)
+            self._market_regime_cache[cache_key] = None
+            return None
+
+        snapshot = _market_regime_snapshot(index_symbol, candles)
+        self._market_regime_cache[cache_key] = snapshot
+        return snapshot
+
     def place_order(self, request: OrderRequest) -> OrderResult:
         if not self.live_trading:
             order_id = f"dryrun-{uuid4()}"
@@ -175,3 +211,35 @@ def _close_to_close_trend_pct(candles: list[dict]) -> float | None:
     if first <= 0:
         return None
     return ((last - first) / first) * 100
+
+
+def _market_regime_snapshot(symbol: str, candles: list[dict]) -> MarketRegimeSnapshot | None:
+    if not candles:
+        return None
+
+    typical_sum = 0.0
+    for candle in candles:
+        typical_sum += (
+            float(candle["high"]) + float(candle["low"]) + float(candle["close"])
+        ) / 3
+
+    latest = candles[-1]
+    candle_time = latest["date"]
+    if not isinstance(candle_time, datetime):
+        candle_time = datetime.fromisoformat(str(candle_time))
+    close = float(latest["close"])
+    day_open = float(candles[0]["open"])
+    trend_6_pct = None
+    if len(candles) > 6:
+        previous = float(candles[-7]["close"])
+        if previous > 0:
+            trend_6_pct = ((close - previous) / previous) * 100
+
+    return MarketRegimeSnapshot(
+        symbol=symbol,
+        timestamp=candle_time,
+        close=close,
+        average_price=typical_sum / len(candles),
+        day_move_pct=((close - day_open) / day_open) * 100 if day_open > 0 else 0.0,
+        trend_6_pct=trend_6_pct,
+    )

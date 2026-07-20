@@ -73,6 +73,18 @@ class SymbolQualityConfig:
 
 
 @dataclass(frozen=True)
+class MarketRegimeConfig:
+    enabled: bool = False
+    index_symbol: str = "NIFTY 50"
+    require_average_side: bool = True
+    min_trend_6_pct: float = 0.05
+    allow_strong_stock_exception: bool = False
+    exception_side: str = "SELL"
+    exception_min_stock_vwap_distance_pct: float = 1.0
+    exception_min_signal_strength_pct: float = 0.50
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     trade_selection: str = "per_symbol"
     position_sizing: str = "configured_quantity"
@@ -80,6 +92,7 @@ class ExecutionConfig:
     confirmation: ConfirmationConfig = field(default_factory=ConfirmationConfig)
     retry_after_loss: RetryAfterLossConfig = field(default_factory=RetryAfterLossConfig)
     symbol_quality: SymbolQualityConfig = field(default_factory=SymbolQualityConfig)
+    market_regime: MarketRegimeConfig = field(default_factory=MarketRegimeConfig)
 
 
 @dataclass(frozen=True)
@@ -117,6 +130,7 @@ def load_config(path: str | Path) -> BotConfig:
     confirmation_raw = execution_raw.pop("confirmation", {})
     retry_after_loss_raw = execution_raw.pop("retry_after_loss", {})
     symbol_quality_raw = execution_raw.pop("symbol_quality", {})
+    market_regime_raw = execution_raw.pop("market_regime", {})
 
     return BotConfig(
         broker=BrokerConfig(**raw["broker"]),
@@ -139,6 +153,7 @@ def load_config(path: str | Path) -> BotConfig:
                     ],
                 }
             ),
+            market_regime=MarketRegimeConfig(**market_regime_raw),
         ),
         watchlist=watchlist,
     )
